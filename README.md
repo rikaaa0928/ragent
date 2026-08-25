@@ -1,67 +1,69 @@
+**English** | [简体中文](README.zh-CN.md)
+
 # ragent
 
-`ragent` 是一个以 WebAssembly Component 扩展为核心的极简流式 LLM Agent。
+`ragent` is a minimal streaming LLM agent built around WebAssembly Component extensions.
 
-本体只保留三类职责：
+The core has only three responsibilities:
 
-- 模型请求与流式响应 I/O
-- 上下文提交
-- Agent/ReAct 循环
+- model request and streaming response I/O;
+- context commits;
+- the Agent/ReAct loop.
 
-工具、System Prompt 调整、模型参数调整、输入处理、上下文处理以及各阶段通知都通过 WASM 扩展完成。项目本身不硬编码任何内置工具；仓库中的 Shell 仅是一个可选示例扩展。
+Tools, System Prompt changes, model parameter changes, input processing, context processing, and lifecycle notifications are all implemented through WASM extensions. The core contains no hard-coded tool. The Shell component in this repository is an optional example extension.
 
-## 工作方式
+## How it works
 
 ```text
-用户输入
+user input
   -> WASM hooks
-  -> 构造模型请求
-  -> 流式模型 I/O
+  -> build model request
+  -> streaming model I/O
   -> WASM hooks
-  -> 可选工具 Action
-  -> 上下文提交
-  -> 下一轮或结束
+  -> optional tool Action
+  -> context commit
+  -> next turn or finish
 ```
 
-扩展使用统一的 WIT Component ABI 和 JSON Hook 协议。完整的架构、Hook 点位、请求与返回结构、工具所有权规则，以及 Rust、Go、AssemblyScript、Python 开发方式见：
+Extensions use a single WIT Component ABI and a JSON Hook protocol. For the architecture, every Hook contract, tool ownership rules, and development instructions for Rust, Go, AssemblyScript, and Python, see:
 
-> [扩展开发与 Hook 协议](EXTENSIONS.md)
+> [Extension development and Hook protocol](EXTENSIONS.md)
 
-## 环境要求
+## Requirements
 
-- Rust 工具链
-- 构建示例扩展时需要 `wasm32-unknown-unknown` target
-- 一个兼容 OpenAI Responses API 的模型服务
+- Rust toolchain
+- The `wasm32-unknown-unknown` target when building the example extension
+- A model service compatible with the OpenAI Responses API
 
-安装 Rust WASM target：
+Install the Rust WASM target:
 
 ```sh
 rustup target add wasm32-unknown-unknown
 ```
 
-## 构建
+## Build
 
-构建 Agent：
+Build the Agent:
 
 ```sh
 cargo build --release
 ```
 
-构建仓库提供的 Shell 示例扩展：
+Build the bundled Shell example extension:
 
 ```sh
 ./scripts/build-extensions.sh
 ```
 
-生成的 Component 位于：
+The generated Component is written to:
 
 ```text
 extensions/shell/target/component/ragent_shell_extension.wasm
 ```
 
-## 配置
+## Configuration
 
-模型连接通过环境变量提供：
+Configure the model connection with environment variables:
 
 ```sh
 export ROSETTA_URL="https://example.com/v1"
@@ -69,7 +71,7 @@ export ROSETTA_TOKEN="your-token"
 export MODEL_NAME="your-model"
 ```
 
-扩展通过 `~/.config/ragent/config.toml` 加载。安装 Shell 示例扩展：
+Extensions are loaded from `~/.config/ragent/config.toml`. Install the example Shell extension:
 
 ```sh
 mkdir -p ~/.config/ragent/extensions
@@ -77,7 +79,7 @@ cp extensions/shell/target/component/ragent_shell_extension.wasm \
   ~/.config/ragent/extensions/shell.wasm
 ```
 
-然后创建配置：
+Then create the configuration:
 
 ```toml
 [[extensions]]
@@ -86,46 +88,46 @@ path = "extensions/shell.wasm"
 enabled = true
 ```
 
-配置文件当前只负责发现扩展和传递扩展初始化配置。相对路径以 `~/.config/ragent/` 为基准。
+The configuration file currently only discovers extensions and supplies their initialization configuration. Relative paths are resolved from `~/.config/ragent/`.
 
-## 使用
+## Usage
 
-直接执行一次会话：
-
-```sh
-cargo run -- "查看当前目录下有哪些文件"
-```
-
-指定会话存储目录：
+Start a session:
 
 ```sh
-cargo run -- "分析这个项目" -d .ragent/sessions
+cargo run -- "List the files in the current directory"
 ```
 
-会话管理：
+Use a custom session directory:
+
+```sh
+cargo run -- "Analyze this project" -d .ragent/sessions
+```
+
+Manage sessions:
 
 ```sh
 cargo run -- s list
 cargo run -- s view sess_example
-cargo run -- s sess_example "继续分析"
+cargo run -- s sess_example "Continue the analysis"
 cargo run -- s del sess_example
 ```
 
-查看完整命令：
+Show all commands:
 
 ```sh
 cargo run -- --help
 ```
 
-## 默认行为
+## Default behavior
 
-- 默认 System Prompt 只有：`你是一个高效、精准的 AI 智能体助手`
-- 未加载扩展时工具列表为空
-- 不进行自动上下文裁剪
-- `max_iterations = 0` 表示不限制循环轮数
-- Session ID 只允许字母、数字、`_`、`-`，最大 64 个字符
+- The default System Prompt is exactly: `你是一个高效、精准的 AI 智能体助手`
+- The tool list is empty when no extension is loaded.
+- Context is never pruned automatically.
+- `max_iterations = 0` means that the loop is unlimited.
+- Session IDs may contain only letters, digits, `_`, and `-`, with a maximum length of 64 characters.
 
-## 验证
+## Verification
 
 ```sh
 cargo fmt --all --check
@@ -133,15 +135,15 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-Shell 扩展测试同时验证成功命令和非零退出码；非零退出码会作为失败结果返回给 Agent。
+The Shell extension tests cover both successful commands and non-zero exit codes. A non-zero exit code is returned to the Agent as a failed tool result.
 
-## 项目结构
+## Repository layout
 
 ```text
-src/agent.rs              Agent I/O 与 loop
-src/context.rs            上下文保存与提交
-src/wasm/                 WASM 加载、调度和协议类型
+src/agent.rs              Agent I/O and loop
+src/context.rs            context storage and commits
+src/wasm/                 WASM loading, dispatch, and protocol types
 wit/ragent-extension.wit  Component ABI
-extensions/               仓库提供的可选扩展示例
-EXTENSIONS.md             扩展开发与 Hook 协议
+extensions/               optional bundled extension examples
+EXTENSIONS.md             extension development and Hook protocol
 ```

@@ -1,23 +1,25 @@
-# ragent 扩展开发与 Hook 协议
+**English** | [简体中文](EXTENSIONS.zh-CN.md)
 
-本文档描述当前代码已经实现的 WASM Component 扩展协议。协议入口见 [`wit/ragent-extension.wit`](wit/ragent-extension.wit)，Rust 数据结构见 [`src/wasm/types.rs`](src/wasm/types.rs)，可运行的完整示例见 [`extensions/shell`](extensions/shell)。
+# ragent extension development and Hook protocol
 
-## 1. 设计目标
+This document describes the WASM Component extension protocol implemented by the current code. See [`wit/ragent-extension.wit`](wit/ragent-extension.wit) for the ABI, [`src/wasm/types.rs`](src/wasm/types.rs) for the Rust data structures, and [`extensions/shell`](extensions/shell) for a complete working extension.
 
-Agent 本体只负责模型 I/O、上下文提交和循环控制。扩展可以在各阶段修改：
+## 1. Design goals
 
-- System Prompt
-- 模型名称、温度、最大输出 Token
-- 工具列表、工具参数和工具结果
-- 用户输入、模型请求和模型响应
-- 待提交的上下文
-- 是否继续下一轮
+The Agent core only owns model I/O, context commits, and loop control. Extensions can modify:
 
-WASM 在这里是跨语言扩展载体，不是安全沙箱。扩展能否执行某项宿主能力由 WIT import 决定；当前宿主只提供 `host.execute-command`，它会直接在宿主机上通过 `sh -c` 执行命令。不要加载不受信任的 Shell 扩展。
+- the System Prompt;
+- model name, temperature, and maximum output tokens;
+- tool definitions, tool arguments, and tool results;
+- user input, model requests, and model responses;
+- pending context commits;
+- the decision to continue the loop.
+
+WASM is a cross-language extension format here, not a security sandbox. Host capabilities are determined by WIT imports. The current host provides only `host.execute-command`, which executes commands directly on the host through `sh -c`. Do not load an untrusted Shell extension.
 
 ## 2. Component ABI
 
-所有扩展必须实现 `plugin` world：
+Every extension must implement the `plugin` world:
 
 ```wit
 package ragent:extension@1.0.0;
@@ -46,20 +48,20 @@ world plugin {
 }
 ```
 
-四个生命周期方法的含义：
+Lifecycle methods:
 
-| 方法 | 调用次数 | 说明 |
+| Method | Calls | Purpose |
 | --- | ---: | --- |
-| `metadata` | 加载时一次 | 返回扩展身份和 Hook 订阅的 JSON |
-| `initialize` | Agent 初始化时一次 | 接收配置文件中 `[extensions.config]` 对应的 JSON |
-| `invoke` | 每次 Hook | 接收 HookRequest JSON，返回 HookResult JSON或错误字符串 |
-| `shutdown` | Agent 关闭时一次 | 释放扩展内部状态 |
+| `metadata` | Once while loading | Returns extension identity and Hook subscriptions as JSON |
+| `initialize` | Once during Agent initialization | Receives the matching `[extensions.config]` value as JSON |
+| `invoke` | Once per Hook invocation | Receives HookRequest JSON and returns HookResult JSON or an error string |
+| `shutdown` | Once while shutting down | Releases extension state |
 
-选择单一 JSON `invoke` 而不是为每个 Hook 增加 WIT 方法，是为了在新增 Hook 时保持 Component ABI 稳定。JSON 协议当前为 `protocol_version = 1`。
+One JSON-based `invoke` method keeps the Component ABI stable when new Hooks are added. The current JSON protocol is `protocol_version = 1`.
 
-## 3. 元数据
+## 3. Metadata
 
-`metadata()` 返回：
+`metadata()` returns:
 
 ```json
 {
@@ -76,23 +78,23 @@ world plugin {
 }
 ```
 
-字段规则：
+Rules:
 
-- `id` 是扩展的真实身份，必须非空且在一次加载中唯一。
-- `version` 是扩展自己的版本，不是 Hook 协议版本。
-- `hook` 必须使用本文列出的 Hook 名称。
-- `kind` 只能是 `transform`、`action`、`observer`。
-- `priority` 越小越先执行；相同优先级保持配置加载顺序。
-- `failure` 为 `abort` 或 `ignore`。
-- 同一扩展不能重复声明相同 Hook 和类型。
+- `id` is the real extension identity. It must be non-empty and unique within one load.
+- `version` is the extension version, not the Hook protocol version.
+- `hook` uses one of the Hook names documented below.
+- `kind` is `transform`, `action`, or `observer`.
+- Lower `priority` values run first. Configuration order breaks ties.
+- `failure` is `abort` or `ignore`.
+- One extension cannot declare the same Hook and kind more than once.
 
-配置文件中的 `name` 只是加载时使用的名称，所有权和去重以元数据 `id` 为准。
+The configuration entry's `name` is a loader-facing label. Identity, ownership, and duplicate checks use metadata `id`.
 
-## 4. 通用请求与返回
+## 4. Common request and result envelopes
 
 ### 4.1 HookRequest
 
-`invoke()` 收到的字符串反序列化后为：
+`invoke()` receives a JSON string with this shape:
 
 ```json
 {
@@ -104,15 +106,15 @@ world plugin {
 }
 ```
 
-- `invocation_id` 是进程内单调递增的调用编号，可用于日志关联。
-- `iteration` 只在轮次内 Hook 出现；初始化、输入和关闭 Hook 可能没有该字段。
-- `payload` 的具体结构由 Hook 点决定。
+- `invocation_id` increases monotonically within the process and can correlate logs.
+- `iteration` is present for turn-scoped Hooks. Initialization, input, and shutdown Hooks may omit it.
+- `payload` is defined by the Hook point.
 
-扩展应拒绝自己不支持的 `protocol_version`，不要猜测结构。
+Reject unsupported `protocol_version` values instead of guessing their structure.
 
 ### 4.2 HookResult
 
-Transform 和 Action 返回统一信封：
+Transform and Action return one envelope:
 
 ```json
 {
@@ -122,40 +124,40 @@ Transform 和 Action 返回统一信封：
 }
 ```
 
-| action | Transform 含义 | Action 含义 |
+| action | Transform | Action |
 | --- | --- | --- |
-| `continue` | 用 `payload` 替换当前草稿并继续 | 返回 Action 结果；必须有 `payload` |
-| `unchanged` | 保留输入并继续 | 不允许 |
-| `reject` | 以 `reason` 拒绝并终止 | 以 `reason` 拒绝并终止 |
-| `skip` | 跳过当前阶段，具体效果由 Hook 决定 | 不允许 |
-| `stop` | 停止当前外围流程，具体效果由 Hook 决定 | 不允许 |
+| `continue` | Replace the current draft with `payload` and continue | Return the Action result; `payload` is required |
+| `unchanged` | Keep the input and continue | Not allowed |
+| `reject` | Reject with `reason` and terminate | Reject with `reason` and terminate |
+| `skip` | Skip the stage; exact behavior depends on the Hook | Not allowed |
+| `stop` | Stop the surrounding flow; exact behavior depends on the Hook | Not allowed |
 
-Observer 的返回值被忽略，但 `invoke()` 的成功分支仍必须返回合法 JSON 字符串，例如 `{"action":"unchanged"}`。
+Observer results are ignored, but the successful branch of `invoke()` must still return a valid JSON string, such as `{"action":"unchanged"}`.
 
-### 4.3 三种调度类型
+### 4.3 Dispatch kinds
 
 #### Transform
 
-按优先级串行执行，后一扩展接收前一扩展已经校验过的结果。它既能修改，也能从空列表中添加能力，因此不再单独设计 Provider。
+Transforms run serially by priority. Each extension receives the previous extension's already validated result. A Transform can contribute to an initially empty list, so there is no separate Provider kind.
 
-每个返回都会立即校验：
+Every result is validated immediately:
 
-- `failure = "abort"`：错误包含扩展 ID 和 Hook 名，Agent 终止。
-- `failure = "ignore"`：丢弃本扩展结果，回滚到它执行前的值，然后继续。
+- `failure = "abort"`: fail with the extension ID and Hook name.
+- `failure = "ignore"`: discard this extension's result, roll back to its input, and continue.
 
-`reject` 已覆盖 Gate 的用途，因此没有独立 Gate 类型。
+`reject` covers gating, so there is no separate Gate kind.
 
 #### Action
 
-用于实际副作用。核心根据不可伪造的 Owner 将调用路由给唯一扩展，不做广播。当前 Action 只有 `tools.call`。
+Actions perform side effects. The core routes an Action to exactly one immutable owner; Actions are not broadcast. The current Action Hook is `tools.call`.
 
 #### Observer
 
-向所有订阅者并发广播。返回内容不参与流程；`abort` 策略下调用错误仍会传播，`ignore` 下忽略该扩展错误。
+Observers are broadcast concurrently. Their returned values never change the flow. Invocation errors propagate with `abort` and are discarded with `ignore`.
 
-## 5. AgentDraft 与工具所有权
+## 5. AgentDraft and tool ownership
 
-`agent.prepare` 和 `turn.prepare` 使用同一个 AgentDraft：
+`agent.prepare` and `turn.prepare` share one AgentDraft shape:
 
 ```json
 {
@@ -170,7 +172,7 @@ Observer 的返回值被忽略，但 `invoke()` 的成功分支仍必须返回�
 }
 ```
 
-`turn.prepare` 中的 `context` 为只读：
+In `turn.prepare`, `context` is read-only:
 
 ```json
 {
@@ -184,17 +186,17 @@ Observer 的返回值被忽略，但 `invoke()` 的成功分支仍必须返回�
 }
 ```
 
-扩展可以根据完整 `items` 或轻量 `view` 动态调整工具、Prompt 和模型参数。核心会把扩展返回的 `context` 恢复为输入值，扩展不能在这个 Hook 中提交上下文；需要修改上下文时使用 `context.commit`。
+An extension can use complete `items` or the compact `view` to change tools, the Prompt, or model parameters dynamically. The core restores `context` to its input value after each Transform. Use `context.commit` when modifying context.
 
-### 5.1 添加工具
+### 5.1 Adding a tool
 
-新工具必须省略 `id` 和 `owner`：
+A new tool must omit `id` and `owner`:
 
 ```json
 {
   "enabled": true,
   "name": "weather",
-  "description": "查询天气",
+  "description": "Look up the weather",
   "parameters": {
     "type": "object",
     "properties": {
@@ -205,7 +207,7 @@ Observer 的返回值被忽略，但 `invoke()` 的成功分支仍必须返回�
 }
 ```
 
-核心返回给后续扩展时会变为：
+The core supplies both fields before the next extension runs:
 
 ```json
 {
@@ -213,86 +215,86 @@ Observer 的返回值被忽略，但 `invoke()` 的成功分支仍必须返回�
   "owner": "weather-extension",
   "enabled": true,
   "name": "weather",
-  "description": "查询天气",
+  "description": "Look up the weather",
   "parameters": {"type": "object"}
 }
 ```
 
-所有权规则：
+Ownership rules:
 
-- 新增工具的扩展必须同时以 `action` 订阅 `tools.call`。
-- 新工具不能自行填写 ID；未知 ID 会被拒绝。
-- 修改已有工具时 ID 必须保留，Owner 会由核心恢复，不能夺取所有权。
-- 工具可以修改、禁用、删除或重排。
-- 所有工具名称和 ID 都必须唯一，即使工具被禁用也不能重名。
-- `parameters` 顶层 `type` 当前必须为 `object`。
+- An extension adding a tool must also subscribe to `tools.call` as an Action.
+- A new tool cannot supply an ID. Unknown supplied IDs are rejected.
+- An existing tool keeps its ID. The core restores its Owner, preventing takeover.
+- Tools may be modified, disabled, deleted, or reordered.
+- All names and IDs must be unique, including disabled tools.
+- The top-level `parameters.type` must currently be `object`.
 
-### 5.2 模型参数校验
+### 5.2 Model validation
 
-- `system_prompt` 不能为空。
-- 模型名称不能为空。
-- `temperature` 必须为空或位于 `0..=2`。
-- `max_output_tokens` 必须为空或大于 0。
+- `system_prompt` must not be empty.
+- The model name must not be empty.
+- `temperature` is null or within `0..=2`.
+- `max_output_tokens` is null or greater than zero.
 
-## 6. Agent 流程
+## 6. Agent flow
 
 ```text
-读取 ~/.config/ragent/config.toml
-  -> 加载 Component / metadata
-  -> 校验订阅
+read ~/.config/ragent/config.toml
+  -> load Components / metadata
+  -> validate subscriptions
   -> initialize
   -> agent.prepare
-  -> 保存 BaseAgentState
+  -> save BaseAgentState
 
-输入
+input
   -> input.prepare
   -> context.commit(reason=input)
 
-每一轮
-  -> clone BaseAgentState + 当前完整上下文
+each turn
+  -> clone BaseAgentState + complete current context
   -> turn.prepare
   -> model.request.prepare
-  -> 模型流式 I/O
-       -> model.stream.observe（每个标准化事件）
+  -> streaming model I/O
+       -> model.stream.observe for every normalized event
   -> model.response.prepare
   -> context.commit(reason=model_response)
-  -> 若包含工具调用：
+  -> when tool calls exist:
        tool.call.prepare
-       -> tools.call（路由给工具 Owner）
+       -> tools.call routed to the tool Owner
        -> tool.result.prepare
        -> context.commit(reason=tool_results)
   -> turn.complete
-  -> 继续或结束
+  -> continue or finish
 
-运行错误 -> agent.error
-关闭     -> agent.shutdown -> lifecycle.shutdown
+run error -> agent.error
+shutdown  -> agent.shutdown -> lifecycle.shutdown
 ```
 
-`BaseAgentState` 不会被每轮动态变更永久污染。若要永久添加工具或修改默认 Prompt，在 `agent.prepare` 修改；若要按上下文动态变化，在 `turn.prepare` 修改。
+Per-turn changes never mutate `BaseAgentState`. Use `agent.prepare` for persistent default tools or Prompt changes. Use `turn.prepare` for context-dependent changes.
 
-## 7. Hook 点位与载荷
+## 7. Hook points and payloads
 
-下表中的“返回”指 `HookResult.payload`。`unchanged` 不需要携带 payload。
+“Result” below means `HookResult.payload`. `unchanged` does not need a payload.
 
-| Hook | 类型 | 时机 | 输入/返回 payload | skip / stop |
+| Hook | Kind | Timing | Input/result payload | skip / stop |
 | --- | --- | --- | --- | --- |
-| `agent.prepare` | Transform | 初始化扩展后 | `AgentDraft -> AgentDraft` | 两者都会使 Agent 初始化失败 |
-| `input.prepare` | Transform | 用户输入提交前 | `{text:string, delayed:bool}` | skip 丢弃输入；stop 停止运行 |
-| `turn.prepare` | Transform | 每轮构造请求前 | `AgentDraft -> AgentDraft`，含只读 context | skip 跳过本轮；stop 结束 loop |
-| `model.request.prepare` | Transform | 调用模型前 | Open Responses `CreateResponseBody` JSON | skip 跳过本轮；stop 结束 loop |
-| `model.stream.observe` | Observer | 每个流事件 | 标准化事件 JSON | 不适用 |
-| `model.response.prepare` | Transform | 流结束、提交前 | `{text:string, items:Item[]}` | skip 丢弃响应并进入下一轮；stop 结束 loop |
-| `tool.call.prepare` | Transform | Action 前 | `ToolCallRequest -> ToolCallRequest` | skip 生成“已跳过”工具输出；stop 结束 loop |
-| `tools.call` | Action | 实际执行工具 | `ToolCallRequest -> ToolResult` | Action 不允许 skip/stop |
-| `tool.result.prepare` | Transform | 工具结果提交前 | `{call:ToolCallRequest,result:ToolResult}` | 当前 skip/stop 均保留进入 Hook 前的结果 |
-| `context.commit` | Transform | 任意上下文写入前 | `ContextCommitDraft -> ContextCommitDraft` | 不提交；调用方停止或跳过对应阶段 |
-| `turn.complete` | Transform | 一轮结束时 | `{iteration,called_tools,continue_loop}` | skip 保持原决定；stop 结束 loop |
-| `agent.error` | Observer | `run()` 返回错误时 | `{error:string}` | 不适用；Observer 错误在此处不会覆盖原错误 |
-| `agent.shutdown` | Observer | 生命周期 shutdown 前 | `{}` | 不适用；即使 Observer 报错仍会调用 lifecycle shutdown |
+| `agent.prepare` | Transform | After extension initialization | `AgentDraft -> AgentDraft` | Both make Agent initialization fail |
+| `input.prepare` | Transform | Before user input is committed | `{text:string, delayed:bool}` | skip drops input; stop stops the run |
+| `turn.prepare` | Transform | Before each model request is built | `AgentDraft -> AgentDraft`, with read-only context | skip skips the turn; stop exits the loop |
+| `model.request.prepare` | Transform | Immediately before model I/O | Open Responses `CreateResponseBody` JSON | skip skips the turn; stop exits the loop |
+| `model.stream.observe` | Observer | For each streaming event | Normalized event JSON | Not applicable |
+| `model.response.prepare` | Transform | After the stream, before commit | `{text:string, items:Item[]}` | skip discards and retries next turn; stop exits |
+| `tool.call.prepare` | Transform | Before the Action | `ToolCallRequest -> ToolCallRequest` | skip emits a skipped output; stop exits |
+| `tools.call` | Action | Actual tool execution | `ToolCallRequest -> ToolResult` | Actions reject skip/stop |
+| `tool.result.prepare` | Transform | Before committing tool output | `{call:ToolCallRequest,result:ToolResult}` | Current skip/stop retain the pre-Hook result |
+| `context.commit` | Transform | Before any context write | `ContextCommitDraft -> ContextCommitDraft` | Does not commit; caller stops or skips its stage |
+| `turn.complete` | Transform | At the end of a turn | `{iteration,called_tools,continue_loop}` | skip retains the original decision; stop exits |
+| `agent.error` | Observer | When `run()` returns an error | `{error:string}` | Observer errors do not replace the original error |
+| `agent.shutdown` | Observer | Before lifecycle shutdown | `{}` | Lifecycle shutdown still runs if the Observer fails |
 
 ### 7.1 model.stream.observe
 
-标准化事件目前有：
+Normalized events currently include:
 
 ```json
 {"type":"text_delta","delta":"partial text"}
@@ -302,9 +304,9 @@ Observer 的返回值被忽略，但 `invoke()` 的成功分支仍必须返回�
 {"type":"other"}
 ```
 
-这是高频 Hook。不要在里面执行昂贵的同步工作。
+This is a high-frequency Hook. Avoid expensive synchronous work.
 
-### 7.2 ToolCallRequest / ToolResult
+### 7.2 ToolCallRequest and ToolResult
 
 ```json
 {
@@ -315,9 +317,9 @@ Observer 的返回值被忽略，但 `invoke()` 的成功分支仍必须返回�
 }
 ```
 
-`tool.call.prepare` 可以修改 `arguments`。`call_id` 和 `tool_id` 不可修改；`name` 最终会由核心恢复为该 ToolEntry 的名称。
+`tool.call.prepare` may change `arguments`. It cannot change `call_id` or `tool_id`. The core restores `name` from the ToolEntry before routing.
 
-Action 必须返回：
+The Action returns:
 
 ```json
 {
@@ -330,7 +332,7 @@ Action 必须返回：
 }
 ```
 
-工具失败也应返回正常的 HookResult，并令 `success = false`；只有扩展协议本身失败时才返回 WIT `err(string)`。
+A normal tool failure is still a successful WIT invocation with `success = false`. Return WIT `err(string)` only when the extension protocol itself fails.
 
 ### 7.3 context.commit
 
@@ -343,18 +345,18 @@ Action 必须返回：
 }
 ```
 
-- `reason` 为 `input`、`model_response` 或 `tool_results`。
-- `current` 是提交前上下文。
-- `pending` 是本次准备追加的 Item。
-- `next` 默认是 `current + pending`，扩展应修改并返回 `next`。
+- `reason` is `input`, `model_response`, or `tool_results`.
+- `current` is context before the commit.
+- `pending` contains Items about to be appended.
+- `next` defaults to `current + pending`; modify and return `next`.
 
-核心会反序列化 `next` 并检查：System Message 不能混入 Items、Function Call ID 不能重复、Function Call Output 必须引用已经出现的 Call ID。System Prompt 始终通过模型请求的 `instructions` 单独提交。
+The core deserializes `next` and checks that System Messages stay outside Items, Function Call IDs are unique, and Function Call Outputs reference an earlier Call ID. The System Prompt is submitted separately through model request `instructions`.
 
-## 8. 用 Rust 开发
+## 8. Developing in Rust
 
-Rust 是当前仓库完整验证的开发路径。最简单的方式是复制 [`extensions/shell`](extensions/shell)。
+Rust is the fully verified path in this repository. The easiest starting point is [`extensions/shell`](extensions/shell).
 
-`Cargo.toml`：
+`Cargo.toml`:
 
 ```toml
 [lib]
@@ -366,7 +368,7 @@ serde_json = "1"
 wit-bindgen = "0.46"
 ```
 
-入口骨架：
+Minimal entry point:
 
 ```rust
 wit_bindgen::generate!({
@@ -407,7 +409,7 @@ impl exports::ragent::extension::lifecycle::Guest for Extension {
 export!(Extension);
 ```
 
-构建 core Wasm 并转换为 Component：
+Build core Wasm and convert it to a Component:
 
 ```sh
 cargo build --target wasm32-unknown-unknown --release
@@ -417,13 +419,13 @@ cargo run --manifest-path /path/to/ragent/Cargo.toml \
   example.component.wasm
 ```
 
-仓库脚本 [`scripts/build-extensions.sh`](scripts/build-extensions.sh) 就是这条流程。
+[`scripts/build-extensions.sh`](scripts/build-extensions.sh) implements this exact process.
 
-## 9. 用 Go 开发
+## 9. Developing in Go
 
-推荐使用 Bytecode Alliance 的 [`componentize-go`](https://github.com/bytecodealliance/componentize-go) 或 `wit-bindgen go`。当前工具要求和生成 API仍在变化，应先执行本机版本的 `--help`，并以生成代码中的函数签名为准。
+Use Bytecode Alliance [`componentize-go`](https://github.com/bytecodealliance/componentize-go) or `wit-bindgen go`. These tools and generated APIs are evolving, so check the locally installed version's `--help` and follow its generated signatures.
 
-基本流程：
+Basic setup:
 
 ```sh
 go mod init example.com/ragent-extension
@@ -431,9 +433,9 @@ go install github.com/bytecodealliance/componentize-go@latest
 componentize-go --help
 ```
 
-将本项目 `wit/` 复制或链接到 Go 模块，选择 world `plugin`，生成绑定；然后在生成的 lifecycle export 包中实现 `Metadata`、`Initialize`、`Invoke`、`Shutdown`。所有业务结构仍是本文定义的 JSON，不需要在 Go 中重新实现 Hook 调度协议。
+Copy or link this project's `wit/` into the Go module, select world `plugin`, and generate bindings. Implement `Metadata`, `Initialize`, `Invoke`, and `Shutdown` in the generated lifecycle export package. Hook business data remains JSON.
 
-也可以使用较底层的流程：
+The lower-level build path is:
 
 ```sh
 wit-bindgen go -w plugin /path/to/ragent/wit
@@ -446,18 +448,18 @@ wasm-tools component new core-with-wit.wasm -o extension.wasm \
   --adapt wasi_snapshot_preview1.reactor.wasm
 ```
 
-注意：ragent 当前只链接 `ragent:extension/host`，没有链接通用 WASI 接口。Go 产物如果还导入 `wasi:*`，会在加载时失败。交付前必须用下文的 `wasm-tools component wit` 检查；在宿主加入 WASI 支持前，Go 路线属于需要自行处理 WASI 依赖的实验性路线。
+ragent currently links only `ragent:extension/host`, not general WASI interfaces. A Go result that still imports `wasi:*` fails during loading. Inspect it with `wasm-tools component wit`. Until the host supports WASI, Go is an experimental path that requires resolving those imports yourself.
 
-## 10. 用 AssemblyScript 开发
+## 10. Developing in AssemblyScript
 
-AssemblyScript 能生成 core Wasm，但当前没有本项目可直接采用的一等 WIT Component 绑定生成器。仅用 `asc` 得到的 `.wasm` 不是 Component，不能直接放进配置。
+AssemblyScript produces core Wasm, but there is currently no first-class WIT Component binding generator directly usable by this project. A `.wasm` produced by `asc` is not a Component and cannot be configured directly.
 
-实验性路线需要：
+An experimental path requires you to:
 
-1. 用 AssemblyScript 实现 lifecycle 和 host import。
-2. 自行实现 WIT Canonical ABI 的字符串、record 和 result lowering/lifting。
-3. 为 core Wasm 嵌入 `plugin` world 类型信息。
-4. 用 `wasm-tools component new` 包装为 Component。
+1. Implement lifecycle exports and the host import in AssemblyScript.
+2. Implement WIT Canonical ABI lowering/lifting for strings, records, and results.
+3. Embed the `plugin` world type into core Wasm.
+4. Wrap it with `wasm-tools component new`.
 
 ```sh
 npx asc assembly/index.ts -o core.wasm
@@ -466,13 +468,15 @@ wasm-tools component embed -w plugin /path/to/ragent/wit \
 wasm-tools component new core-with-wit.wasm -o extension.wasm
 ```
 
-上面的命令不会替你生成 Canonical ABI；如果第 2 步没有正确完成，Component 会在转换或实例化时失败。因此当前更实际的 TypeScript 路线是编译为 ESM JavaScript，再使用 Bytecode Alliance 的 [`ComponentizeJS`](https://github.com/bytecodealliance/ComponentizeJS)。这不是 AssemblyScript 二进制路线，但可以直接从 TypeScript/JavaScript 逻辑生成 Component。
+These commands do not generate the Canonical ABI. Without step 2, conversion or instantiation fails.
 
-由于 ragent 不提供 WASI imports，ComponentizeJS 应通过其 Node API关闭 `stdio`、`random`、`clocks`、`http`、`fetch-event`，生成只依赖目标 WIT world 的 pure component。
+The practical TypeScript alternative is to compile application logic to ESM JavaScript and use Bytecode Alliance [`ComponentizeJS`](https://github.com/bytecodealliance/ComponentizeJS). This is not an AssemblyScript binary pipeline, but it generates a Component directly from TypeScript/JavaScript logic.
 
-## 11. 用 Python 开发
+Because ragent does not provide WASI imports, use the ComponentizeJS Node API to disable `stdio`, `random`, `clocks`, `http`, and `fetch-event`, producing a pure component that depends only on the target WIT world.
 
-使用 Bytecode Alliance 的 [`componentize-py`](https://github.com/bytecodealliance/componentize-py)，需要 Python 3.10 或更高版本：
+## 11. Developing in Python
+
+Use Bytecode Alliance [`componentize-py`](https://github.com/bytecodealliance/componentize-py), which requires Python 3.10 or newer:
 
 ```sh
 python3 -m venv .venv
@@ -482,34 +486,34 @@ componentize-py -d /path/to/ragent/wit -w plugin \
   bindings ragent_guest
 ```
 
-生成绑定后，按照生成包中的 lifecycle 基类实现四个方法。Python 中仍然只需要：
+Implement the four methods using the generated lifecycle base class:
 
-- `metadata()` 返回 JSON 字符串。
-- `initialize(config)` 解析 JSON 配置。
-- `invoke(request)` 解析 HookRequest 并返回 HookResult JSON 字符串。
-- `shutdown()` 释放状态。
+- `metadata()` returns a JSON string.
+- `initialize(config)` parses initialization JSON.
+- `invoke(request)` parses HookRequest and returns a HookResult JSON string.
+- `shutdown()` releases state.
 
-构建：
+Build:
 
 ```sh
 componentize-py -d /path/to/ragent/wit -w plugin \
   componentize --stub-wasi app -o extension.wasm
 ```
 
-必须使用 `--stub-wasi` 或以其他方式确保最终 Component 不依赖宿主未提供的 WASI imports。Python 会把解释器和应用一起打进 Component，因此产物通常明显大于 Rust 扩展，加载时间也更长。
+Use `--stub-wasi`, or otherwise ensure that the Component has no WASI imports unsupported by the host. Python packages the interpreter with the application, so its Component is normally much larger and slower to load than a Rust extension.
 
-## 12. 检查 Component
+## 12. Inspecting a Component
 
-无论使用哪种语言，最终文件必须是 Component，不是普通 core Wasm：
+The final file must be a Component, not a core Wasm module:
 
 ```sh
 wasm-tools validate extension.wasm --features component-model
 wasm-tools component wit extension.wasm
 ```
 
-提取出的 world 必须兼容 `ragent:extension/plugin@1.0.0`。当前宿主只允许项目 WIT 中的 `ragent:extension/host` import；如果输出还列出 `wasi:*` 或其他 import，ragent 目前无法实例化它。
+The extracted world must be compatible with `ragent:extension/plugin@1.0.0`. The current host permits only `ragent:extension/host` from the project WIT. A result containing `wasi:*` or another import cannot currently be instantiated by ragent.
 
-然后用临时配置做加载测试：
+Test loading with a temporary configuration:
 
 ```toml
 [[extensions]]
@@ -518,9 +522,9 @@ path = "/absolute/path/to/extension.wasm"
 enabled = true
 ```
 
-## 13. 安装与加载扩展
+## 13. Installing and loading extensions
 
-默认目录结构：
+Default layout:
 
 ```text
 ~/.config/ragent/
@@ -530,7 +534,7 @@ enabled = true
     └── example.wasm
 ```
 
-`config.toml`：
+`config.toml`:
 
 ```toml
 [[extensions]]
@@ -543,18 +547,18 @@ endpoint = "https://example.com"
 mode = "strict"
 ```
 
-加载规则：
+Loading rules:
 
-- 默认配置目录是 `~/.config/ragent/`。
-- 若设置 `XDG_CONFIG_HOME`，则使用 `$XDG_CONFIG_HOME/ragent/`。
-- 相对 Component 路径相对于配置目录解析。
-- 配置不存在时，Agent 会创建配置目录，但不会自动启用任何扩展。
-- `enabled = false` 的条目不会加载。
-- 扩展按配置顺序加载和初始化。
-- 任一启用扩展文件不存在、元数据无效或初始化失败，Agent 初始化失败。
-- 配置修改后需要重新启动 Agent；当前没有热重载。
+- The default directory is `~/.config/ragent/`.
+- With `XDG_CONFIG_HOME`, it is `$XDG_CONFIG_HOME/ragent/`.
+- Relative Component paths are resolved from the configuration directory.
+- When configuration is absent, the Agent creates the directory but enables no extension.
+- Entries with `enabled = false` are not loaded.
+- Extensions load and initialize in configuration order.
+- A missing enabled file, invalid metadata, or initialization failure aborts Agent initialization.
+- Configuration changes require an Agent restart; hot reload is not implemented.
 
-多个扩展示例：
+Multiple extensions:
 
 ```toml
 [[extensions]]
@@ -571,15 +575,15 @@ enabled = true
 deny_shell = true
 ```
 
-如果两个扩展订阅同一个 Transform，先按 `priority`，再按上述配置顺序执行。
+When multiple extensions subscribe to a Transform, execution is ordered first by `priority`, then by configuration order.
 
-## 14. 调试建议
+## 14. Debugging guidance
 
-- 先让 `metadata` 只订阅一个 Hook，确认能加载后再扩展。
-- `failure = "abort"` 适合开发期，可保留完整错误；可选增强功能上线后再考虑 `ignore`。
-- 在日志中记录 `invocation_id`、`hook`、`iteration`，不要记录 API Key 或敏感上下文。
-- Transform 应尽量保持纯函数；副作用放到 Action 或 Observer。
-- `model.stream.observe` 是高频路径，避免阻塞。
-- 工具扩展必须测试成功、参数错误、宿主错误、非零退出码四类结果。
-- 不要依赖另一个扩展生成的临时工具 ID；ID 只保证当前 Agent 进程和当前草稿链路内稳定。
-- 若 Component 能通过 `wasm-tools validate` 但无法加载，首先检查它是否含有宿主未链接的额外 imports。
+- Start with one metadata subscription and add Hooks after loading succeeds.
+- Use `failure = "abort"` while developing. Consider `ignore` later for optional enhancements.
+- Log `invocation_id`, `hook`, and `iteration`, but never API keys or sensitive context.
+- Keep Transforms close to pure functions. Put side effects in Actions or Observers.
+- Avoid blocking work in the high-frequency `model.stream.observe` Hook.
+- Test successful execution, invalid arguments, host errors, and non-zero exit status for every tool.
+- Do not persist another extension's temporary tool ID. It is stable only within the current Agent process and draft chain.
+- If `wasm-tools validate` succeeds but loading fails, inspect unsupported extra imports first.
