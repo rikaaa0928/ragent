@@ -1,2 +1,4 @@
 target/
 .ragent
+.idea
+.vscode
