@@ -53,6 +53,13 @@ impl AgentContext {
             .extend(items.into_iter().filter(|item| !is_system_message(item)));
     }
 
+    pub fn replace_items(&mut self, items: Vec<Item>) {
+        self.items = items
+            .into_iter()
+            .filter(|item| !is_system_message(item))
+            .collect();
+    }
+
     pub fn items(&self) -> &[Item] {
         &self.items
     }

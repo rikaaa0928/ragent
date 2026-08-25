@@ -11,7 +11,6 @@ use std::sync::Arc;
 /// Agent 极简构建器
 pub struct AgentBuilder {
     config: AgentConfig,
-    system_prompt: Option<String>,
     initial_user_messages: Vec<String>,
     event_handler: Option<Arc<dyn EventHandler>>,
     extension_manager: Option<ExtensionManager>,
@@ -21,16 +20,10 @@ impl AgentBuilder {
     pub fn new(config: AgentConfig) -> Self {
         Self {
             config,
-            system_prompt: None,
             initial_user_messages: Vec::new(),
             event_handler: None,
             extension_manager: None,
         }
-    }
-
-    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.system_prompt = Some(prompt.into());
-        self
     }
 
     pub fn with_user_message(mut self, message: impl Into<String>) -> Self {
@@ -67,13 +60,9 @@ impl AgentBuilder {
         session: SessionData,
         config: AgentConfig,
     ) -> Result<(Agent, AgentSender), AgentError> {
-        let mut builder = Self::new(config);
-        if let Some(ref prompt) = session.system_prompt {
-            builder = builder.with_system_prompt(prompt.clone());
-        }
-        let (mut agent, sender) = builder.build().await?;
-        *agent.context_mut() =
-            crate::context::AgentContext::from_existing(session.items, session.system_prompt);
+        let (mut agent, sender) = Self::new(config).build().await?;
+        let prompt = agent.context().system_prompt().map(str::to_owned);
+        *agent.context_mut() = crate::context::AgentContext::from_existing(session.items, prompt);
         Ok((agent, sender))
     }
 
@@ -85,12 +74,6 @@ impl AgentBuilder {
         };
 
         let (mut agent, sender) = Agent::new_with_manager(self.config, manager).await?;
-
-        if let Some(prompt) = self.system_prompt {
-            agent.set_system_prompt(prompt);
-        } else {
-            agent.set_system_prompt("你是一个高效、精准的 AI 智能体助手");
-        }
 
         for user_msg in self.initial_user_messages {
             agent.add_user_message(user_msg);

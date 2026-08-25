@@ -1,21 +1,23 @@
 use serde::{Deserialize, Serialize};
 
-pub const HOOK_CONFIG_RESOLVE: &str = "config.resolve";
-pub const HOOK_CONTEXT_PREPARE: &str = "context.prepare";
-pub const HOOK_LOOP_AFTER: &str = "loop.after";
-pub const HOOK_LOOP_BEFORE: &str = "loop.before";
-pub const HOOK_MODEL_REQUEST_TRANSFORM: &str = "model.request.transform";
-pub const HOOK_MODEL_RESPONSE: &str = "model.response";
-pub const HOOK_TOOL_RESULT_TRANSFORM: &str = "tool.result.transform";
+pub const HOOK_AGENT_PREPARE: &str = "agent.prepare";
+pub const HOOK_INPUT_PREPARE: &str = "input.prepare";
+pub const HOOK_TURN_PREPARE: &str = "turn.prepare";
+pub const HOOK_MODEL_REQUEST_PREPARE: &str = "model.request.prepare";
+pub const HOOK_MODEL_STREAM_OBSERVE: &str = "model.stream.observe";
+pub const HOOK_MODEL_RESPONSE_PREPARE: &str = "model.response.prepare";
+pub const HOOK_TOOL_CALL_PREPARE: &str = "tool.call.prepare";
 pub const HOOK_TOOLS_CALL: &str = "tools.call";
-pub const HOOK_TOOLS_LIST: &str = "tools.list";
+pub const HOOK_TOOL_RESULT_PREPARE: &str = "tool.result.prepare";
+pub const HOOK_CONTEXT_COMMIT: &str = "context.commit";
+pub const HOOK_TURN_COMPLETE: &str = "turn.complete";
+pub const HOOK_AGENT_ERROR: &str = "agent.error";
+pub const HOOK_AGENT_SHUTDOWN: &str = "agent.shutdown";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum HookKind {
-    Provider,
     Transform,
-    Gate,
     Action,
     Observer,
 }
@@ -49,18 +51,76 @@ pub struct ExtensionMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookRequest {
     pub hook: String,
-    pub version: u32,
+    pub protocol_version: u32,
+    pub invocation_id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iteration: Option<usize>,
     pub payload: serde_json::Value,
 }
 
-impl HookRequest {
-    pub fn new(hook: impl Into<String>, payload: serde_json::Value) -> Self {
-        Self {
-            hook: hook.into(),
-            version: 1,
-            payload,
-        }
-    }
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HookAction {
+    Continue,
+    Unchanged,
+    Reject,
+    Skip,
+    Stop,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookResult {
+    pub action: HookAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowControl {
+    Continue,
+    Skip,
+    Stop,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransformResult {
+    pub payload: serde_json::Value,
+    pub control: FlowControl,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelDraft {
+    pub name: String,
+    pub temperature: Option<f64>,
+    pub max_output_tokens: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentDraft {
+    pub system_prompt: String,
+    pub model: ModelDraft,
+    #[serde(default)]
+    pub tools: Vec<ToolEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(flatten)]
+    pub definition: ToolDefinition,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,14 +130,10 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ToolsListResult {
-    #[serde(default)]
-    pub tools: Vec<ToolDefinition>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRequest {
+    pub call_id: String,
+    pub tool_id: String,
     pub name: String,
     pub arguments: serde_json::Value,
 }
@@ -98,7 +154,6 @@ impl ToolResult {
             error: None,
         }
     }
-
     pub fn err(error: impl Into<String>) -> Self {
         let error = error.into();
         Self {

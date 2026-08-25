@@ -5,7 +5,7 @@ wit_bindgen::generate!({
     world: "plugin",
 });
 
-const TOOLS_LIST_HOOK: &str = "tools.list";
+const AGENT_PREPARE_HOOK: &str = "agent.prepare";
 const TOOLS_CALL_HOOK: &str = "tools.call";
 
 struct ShellExtension;
@@ -51,8 +51,8 @@ impl exports::ragent::extension::lifecycle::Guest for ShellExtension {
             version: env!("CARGO_PKG_VERSION"),
             subscriptions: vec![
                 Subscription {
-                    hook: TOOLS_LIST_HOOK,
-                    kind: "provider",
+                    hook: AGENT_PREPARE_HOOK,
+                    kind: "transform",
                     priority: 100,
                     failure: "abort",
                 },
@@ -74,8 +74,12 @@ impl exports::ragent::extension::lifecycle::Guest for ShellExtension {
     fn invoke(request: String) -> Result<String, String> {
         let request: HookRequest = serde_json::from_str(&request).map_err(|e| e.to_string())?;
         match request.hook.as_str() {
-            TOOLS_LIST_HOOK => Ok(serde_json::json!({
-                "tools": [{
+            AGENT_PREPARE_HOOK => {
+                let mut draft = request.payload;
+                let tools = draft.get_mut("tools").and_then(serde_json::Value::as_array_mut)
+                    .ok_or("agent.prepare payload has no tools array")?;
+                tools.push(serde_json::json!({
+                    "enabled": true,
                     "name": "shell",
                     "description": "在宿主系统上执行 shell 命令。",
                     "parameters": {
@@ -88,9 +92,9 @@ impl exports::ragent::extension::lifecycle::Guest for ShellExtension {
                         },
                         "required": ["command"]
                     }
-                }]
-            })
-            .to_string()),
+                }));
+                Ok(serde_json::json!({"action": "continue", "payload": draft}).to_string())
+            }
             TOOLS_CALL_HOOK => call_tool(request.payload),
             hook => Err(format!("unsupported hook: {hook}")),
         }
@@ -127,11 +131,12 @@ fn call_tool(payload: serde_json::Value) -> Result<String, String> {
             .unwrap_or_else(|| format!("command exited with status {}", result.exit_code))
     });
 
-    serde_json::to_string(&ToolResult {
+    let result = ToolResult {
         success,
         output,
         error,
-    })
+    };
+    serde_json::to_string(&serde_json::json!({"action": "continue", "payload": result}))
     .map_err(|e| e.to_string())
 }
 

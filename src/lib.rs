@@ -20,11 +20,8 @@ pub use event::{
 };
 pub use sender::AgentSender;
 pub use session::{SessionData, SessionMeta, SessionStore};
-pub use wasm::{
-    ExtensionConfigItem, ExtensionManager, ExtensionMetadata, ExtensionsConfig, HookFailurePolicy,
-    HookKind, HookRequest, HookSubscription, ToolCallRequest, ToolDefinition, ToolResult,
-    ToolsListResult, WasmPlugin,
-};
+pub use wasm::types::*;
+pub use wasm::{ExtensionConfigItem, ExtensionManager, ExtensionsConfig, WasmPlugin};
 
 pub use openresponses_rust::{Item, Tool};
 
@@ -46,12 +43,14 @@ mod tests {
             .with_temperature(0.5);
         let (agent, _) = AgentBuilder::new(config)
             .with_extension_manager(ExtensionManager::empty())
-            .with_system_prompt("system")
             .build()
             .await
             .unwrap();
 
-        assert_eq!(agent.context().system_prompt(), Some("system"));
+        assert_eq!(
+            agent.context().system_prompt(),
+            Some("你是一个高效、精准的 AI 智能体助手")
+        );
         assert!(agent.context().items().is_empty());
     }
 
@@ -75,25 +74,62 @@ mod tests {
         manager.add_plugin(plugin).unwrap();
         manager.initialize().await.unwrap();
 
-        let (tools, owners) = manager.resolve_tools(serde_json::json!({})).await.unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "shell");
-
-        let success = manager
-            .execute_tool(
-                &owners,
-                "shell",
-                serde_json::json!({"command": "printf hello"}),
+        let (draft, _) = manager
+            .transform_agent_draft(
+                HOOK_AGENT_PREPARE,
+                None,
+                AgentDraft {
+                    system_prompt: "test".into(),
+                    model: ModelDraft {
+                        name: "test".into(),
+                        temperature: None,
+                        max_output_tokens: None,
+                    },
+                    tools: vec![],
+                    context: None,
+                },
             )
             .await
             .unwrap();
+        assert_eq!(draft.tools.len(), 1);
+        assert_eq!(draft.tools[0].definition.name, "shell");
+        let tool = &draft.tools[0];
+
+        let success = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                tool.owner.as_deref().unwrap(),
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-1".into(),
+                    tool_id: tool.id.clone().unwrap(),
+                    name: "shell".into(),
+                    arguments: serde_json::json!({"command": "printf hello"}),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let success: ToolResult = serde_json::from_value(success).unwrap();
         assert!(success.success);
         assert!(success.output.contains("hello"));
 
         let failure = manager
-            .execute_tool(&owners, "shell", serde_json::json!({"command": "exit 7"}))
+            .action(
+                HOOK_TOOLS_CALL,
+                tool.owner.as_deref().unwrap(),
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-2".into(),
+                    tool_id: tool.id.clone().unwrap(),
+                    name: "shell".into(),
+                    arguments: serde_json::json!({"command": "exit 7"}),
+                })
+                .unwrap(),
+            )
             .await
             .unwrap();
+        let failure: ToolResult = serde_json::from_value(failure).unwrap();
         assert!(!failure.success);
         assert!(failure.error.is_some());
         assert!(failure.output.contains("exit_code: 7"));
@@ -110,8 +146,24 @@ mod tests {
 
         let manager = ExtensionManager::load_from_dir(temp.path()).await.unwrap();
         manager.initialize().await.unwrap();
-        let (tools, _) = manager.resolve_tools(serde_json::json!({})).await.unwrap();
-        assert_eq!(tools[0].name, "shell");
+        let (draft, _) = manager
+            .transform_agent_draft(
+                HOOK_AGENT_PREPARE,
+                None,
+                AgentDraft {
+                    system_prompt: "test".into(),
+                    model: ModelDraft {
+                        name: "test".into(),
+                        temperature: None,
+                        max_output_tokens: None,
+                    },
+                    tools: vec![],
+                    context: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(draft.tools[0].definition.name, "shell");
     }
 
     #[test]

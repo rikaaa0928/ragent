@@ -3,432 +3,694 @@ use crate::context::AgentContext;
 use crate::error::AgentError;
 use crate::event::{AgentEvent, EventHandler};
 use crate::sender::AgentSender;
-use crate::wasm::types::{
-    HOOK_CONFIG_RESOLVE, HOOK_CONTEXT_PREPARE, HOOK_LOOP_AFTER, HOOK_LOOP_BEFORE,
-    HOOK_MODEL_REQUEST_TRANSFORM, HOOK_MODEL_RESPONSE, HOOK_TOOL_RESULT_TRANSFORM,
-};
+use crate::wasm::types::*;
 use crate::wasm::ExtensionManager;
-use futures::future::join_all;
 use futures::StreamExt;
 use openresponses_rust::{
     CreateResponseBody, FunctionOutput, Input, Item, MessageContent, StreamingClient,
     StreamingEvent, Tool, ToolChoiceParam,
 };
+use serde_json::Value;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-/// 极简本体 LLM Agent（基础 I/O + 核心 Loop，功能全靠 WASM 插件扩展）
+const DEFAULT_SYSTEM_PROMPT: &str = "你是一个高效、精准的 AI 智能体助手";
+
+/// 只负责模型 I/O、上下文提交与 ReAct loop；其余行为由 WASM hook 提供。
 pub struct Agent {
     config: AgentConfig,
     client: Arc<StreamingClient>,
     context: AgentContext,
+    base_draft: AgentDraft,
     extension_manager: ExtensionManager,
     event_handler: Arc<dyn EventHandler>,
+    pending_inputs: Vec<String>,
     immediate_rx: UnboundedReceiver<String>,
     delayed_rx: UnboundedReceiver<String>,
 }
 
 impl Agent {
     pub async fn new_with_manager(
-        config: AgentConfig,
+        mut config: AgentConfig,
         manager: ExtensionManager,
     ) -> Result<(Self, AgentSender), AgentError> {
         let (immediate_tx, immediate_rx) = unbounded_channel();
         let (delayed_tx, delayed_rx) = unbounded_channel();
         manager.validate_subscriptions()?;
         manager.initialize().await?;
-        let config = manager
-            .transform(HOOK_CONFIG_RESOLVE, serde_json::to_value(config)?)
+
+        let draft = AgentDraft {
+            system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
+            model: ModelDraft {
+                name: config.model.clone(),
+                temperature: config.temperature,
+                max_output_tokens: config.max_output_tokens,
+            },
+            tools: vec![],
+            context: None,
+        };
+        let (base_draft, control) = manager
+            .transform_agent_draft(HOOK_AGENT_PREPARE, None, draft)
             .await?;
-        let config: AgentConfig = serde_json::from_value(config)?;
+        if control != FlowControl::Continue {
+            return Err(AgentError::HookRejected {
+                hook: HOOK_AGENT_PREPARE.into(),
+                reason: "agent initialization was skipped or stopped".into(),
+            });
+        }
+        config.model = base_draft.model.name.clone();
+        config.temperature = base_draft.model.temperature;
+        config.max_output_tokens = base_draft.model.max_output_tokens;
+
         let client = Arc::new(StreamingClient::with_base_url(
             &config.api_key,
             &config.base_url,
         ));
-        let context = AgentContext::new(None);
-        let event_handler = Arc::new(crate::event::ConsoleEventHandler::new());
-
+        let context = AgentContext::new(Some(base_draft.system_prompt.clone()));
         let agent = Self {
             config,
             client,
             context,
+            base_draft,
             extension_manager: manager,
-            event_handler,
+            event_handler: Arc::new(crate::event::ConsoleEventHandler::new()),
+            pending_inputs: vec![],
             immediate_rx,
             delayed_rx,
         };
-
-        let sender = AgentSender::new(immediate_tx, delayed_tx);
-        Ok((agent, sender))
+        Ok((agent, AgentSender::new(immediate_tx, delayed_tx)))
     }
 
-    /// 使用 ~/.config/ragent/ 配置加载扩展
     pub async fn new(config: AgentConfig) -> Result<(Self, AgentSender), AgentError> {
-        let manager = ExtensionManager::load_from_default_config().await?;
-        Self::new_with_manager(config, manager).await
+        Self::new_with_manager(config, ExtensionManager::load_from_default_config().await?).await
     }
 
     pub fn context(&self) -> &AgentContext {
         &self.context
     }
-
     pub fn context_mut(&mut self) -> &mut AgentContext {
         &mut self.context
     }
-
     pub fn config(&self) -> &AgentConfig {
         &self.config
     }
-
     pub fn config_mut(&mut self) -> &mut AgentConfig {
         &mut self.config
     }
-
     pub fn event_handler(&self) -> &Arc<dyn EventHandler> {
         &self.event_handler
     }
-
     pub fn set_event_handler(&mut self, handler: Arc<dyn EventHandler>) {
         self.event_handler = handler;
     }
-
     pub fn extension_manager(&self) -> &ExtensionManager {
         &self.extension_manager
     }
 
     pub async fn shutdown(&self) -> Result<(), AgentError> {
-        self.extension_manager.shutdown().await
-    }
-
-    pub fn set_system_prompt(&mut self, prompt: impl Into<String>) {
-        self.context.set_system_prompt(prompt);
+        let observed = self
+            .extension_manager
+            .observe(HOOK_AGENT_SHUTDOWN, None, serde_json::json!({}))
+            .await;
+        let shutdown = self.extension_manager.shutdown().await;
+        observed?;
+        shutdown
     }
 
     pub fn add_user_message(&mut self, text: impl Into<String>) {
-        self.context.add_user_message(text);
+        self.pending_inputs.push(text.into());
     }
 
-    fn create_context_view(&self) -> serde_json::Value {
-        let items = self.context.items();
-        let mut recent_messages = Vec::new();
-
-        for item in items {
+    fn context_view(&self) -> Value {
+        let recent_messages = self.context.items().iter().filter_map(|item| {
             if let Item::Message { role, content, .. } = item {
-                let role_str = format!("{:?}", role).to_lowercase();
-                let text_content = content
-                    .iter()
-                    .map(|c| match c {
-                        MessageContent::InputText { text } => text.clone(),
-                        MessageContent::OutputText { text, .. } => text.clone(),
-                        MessageContent::PlainText { text } => text.clone(),
-                        MessageContent::Refusal { refusal } => refusal.clone(),
-                        _ => String::new(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                recent_messages.push(serde_json::json!({
-                    "role": role_str,
-                    "content": text_content,
-                }));
+                let text = content.iter().filter_map(|part| match part {
+                    MessageContent::InputText { text } | MessageContent::OutputText { text, .. }
+                    | MessageContent::PlainText { text } => Some(text.as_str()),
+                    MessageContent::Refusal { refusal } => Some(refusal.as_str()),
+                    _ => None,
+                }).collect::<Vec<_>>().join("\n");
+                Some(serde_json::json!({"role": format!("{role:?}").to_lowercase(), "content": text}))
+            } else { None }
+        }).collect::<Vec<_>>();
+        serde_json::json!({"items_count": self.context.items().len(), "recent_messages": recent_messages})
+    }
+
+    async fn accept_input(
+        &mut self,
+        text: String,
+        delayed: bool,
+    ) -> Result<FlowControl, AgentError> {
+        self.event_handler.on_event(&AgentEvent::MessageReceived {
+            content: text.clone(),
+            is_delayed: delayed,
+        });
+        let transformed = self
+            .extension_manager
+            .transform_validated(
+                HOOK_INPUT_PREPARE,
+                None,
+                serde_json::json!({"text": text, "delayed": delayed}),
+                |value| {
+                    value
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty())
+                        .map(|_| ())
+                        .ok_or_else(|| "text must be a non-empty string".into())
+                },
+            )
+            .await?;
+        if transformed.control == FlowControl::Stop {
+            return Ok(FlowControl::Stop);
+        }
+        if transformed.control == FlowControl::Skip {
+            return Ok(FlowControl::Skip);
+        }
+        let text = transformed
+            .payload
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AgentError::ToolError("input.prepare must return a string field 'text'".into())
+            })?;
+        self.commit_context("input", vec![Item::user_message(text)], None)
+            .await
+    }
+
+    async fn commit_context(
+        &mut self,
+        reason: &str,
+        pending: Vec<Item>,
+        iteration: Option<usize>,
+    ) -> Result<FlowControl, AgentError> {
+        let mut next = self.context.to_items();
+        next.extend(pending.clone());
+        let result = self
+            .extension_manager
+            .transform_validated(
+                HOOK_CONTEXT_COMMIT,
+                iteration,
+                serde_json::json!({
+                    "reason": reason, "current": self.context.to_items(), "pending": pending, "next": next
+                }),
+                validate_context_commit,
+            )
+            .await?;
+        if result.control != FlowControl::Continue {
+            return Ok(result.control);
+        }
+        let next: Vec<Item> =
+            serde_json::from_value(result.payload.get("next").cloned().ok_or_else(|| {
+                AgentError::ToolError("context.commit must return 'next'".into())
+            })?)?;
+        self.context.replace_items(next);
+        Ok(FlowControl::Continue)
+    }
+
+    pub async fn run(&mut self) -> Result<String, AgentError> {
+        let result = self.run_inner().await;
+        if let Err(error) = &result {
+            let _ = self
+                .extension_manager
+                .observe(
+                    HOOK_AGENT_ERROR,
+                    None,
+                    serde_json::json!({"error": error.to_string()}),
+                )
+                .await;
+        }
+        result
+    }
+
+    async fn run_inner(&mut self) -> Result<String, AgentError> {
+        for input in std::mem::take(&mut self.pending_inputs) {
+            if self.accept_input(input, false).await? == FlowControl::Stop {
+                return Ok(String::new());
             }
         }
-
-        serde_json::json!({
-            "items_count": items.len(),
-            "recent_messages": recent_messages,
-        })
-    }
-
-    /// 运行 ReAct 循环主体
-    pub async fn run(&mut self) -> Result<String, AgentError> {
-        // 若上下文未包含任何 System Prompt，注入最简标准 prompt
-        if !self.context.has_system_prompt() {
-            self.context
-                .set_system_prompt("你是一个高效、精准的 AI 智能体助手");
-        }
-
         let mut iteration = 0;
         let mut last_response_text = String::new();
 
         loop {
-            // 检查即时优先插入队列
-            if let Ok(immediate_msg) = self.immediate_rx.try_recv() {
-                self.event_handler.on_event(&AgentEvent::MessageReceived {
-                    content: immediate_msg.clone(),
-                    is_delayed: false,
-                });
-                self.context.add_user_message(immediate_msg);
+            while let Ok(input) = self.immediate_rx.try_recv() {
+                if self.accept_input(input, false).await? == FlowControl::Stop {
+                    self.event_handler.on_event(&AgentEvent::AgentFinished);
+                    return Ok(last_response_text);
+                }
             }
-
             if self.config.max_iterations > 0 && iteration >= self.config.max_iterations {
                 break;
             }
-
             iteration += 1;
-            let _iter_start = Instant::now();
             self.event_handler
                 .on_event(&AgentEvent::TurnStarted { iteration });
 
-            let context_view = self.create_context_view();
-            self.extension_manager
-                .observe(
-                    HOOK_LOOP_BEFORE,
-                    serde_json::json!({"iteration": iteration, "context": context_view}),
-                )
-                .await?;
-
-            let request_items = self
+            let mut draft = self.base_draft.clone();
+            draft.context = Some(serde_json::json!({
+                "items": self.context.to_items(),
+                "view": self.context_view()
+            }));
+            let (draft, turn_control) = self
                 .extension_manager
-                .transform(
-                    HOOK_CONTEXT_PREPARE,
-                    serde_json::to_value(self.context.to_items())?,
-                )
+                .transform_agent_draft(HOOK_TURN_PREPARE, Some(iteration), draft)
                 .await?;
-            let request_items: Vec<Item> = serde_json::from_value(request_items)?;
-            let (active_tools, active_owner_map) = self
-                .extension_manager
-                .resolve_tools(self.create_context_view())
-                .await?;
-
-            let mut request_tools = Vec::new();
-            for t in &active_tools {
-                let open_tool = Tool::function(t.name.clone())
-                    .with_description(t.description.clone())
-                    .with_parameters(t.parameters.clone());
-                request_tools.push(open_tool);
+            if turn_control == FlowControl::Stop {
+                break;
+            }
+            if turn_control == FlowControl::Skip {
+                continue;
             }
 
+            let active_tools = draft
+                .tools
+                .iter()
+                .filter(|tool| tool.enabled)
+                .cloned()
+                .collect::<Vec<_>>();
+            let request_tools = active_tools
+                .iter()
+                .map(|tool| {
+                    Tool::function(tool.definition.name.clone())
+                        .with_description(tool.definition.description.clone())
+                        .with_parameters(tool.definition.parameters.clone())
+                })
+                .collect::<Vec<_>>();
             let request = CreateResponseBody {
-                input: Some(Input::Items(request_items)),
-                model: Some(self.config.model.clone()),
-                instructions: self.context.system_prompt().map(|s| s.to_string()),
-                tools: if request_tools.is_empty() {
-                    None
-                } else {
-                    Some(request_tools)
-                },
-                tool_choice: if active_tools.is_empty() {
-                    None
-                } else {
-                    Some(ToolChoiceParam::default())
-                },
-                temperature: self.config.temperature,
-                max_output_tokens: self.config.max_output_tokens,
+                input: Some(Input::Items(self.context.to_items())),
+                model: Some(draft.model.name.clone()),
+                instructions: Some(draft.system_prompt.clone()),
+                tools: (!request_tools.is_empty()).then_some(request_tools),
+                tool_choice: (!active_tools.is_empty()).then_some(ToolChoiceParam::default()),
+                temperature: draft.model.temperature,
+                max_output_tokens: draft.model.max_output_tokens,
                 stream: Some(true),
                 ..Default::default()
             };
-            let request = self
+            let transformed = self
                 .extension_manager
-                .transform(HOOK_MODEL_REQUEST_TRANSFORM, serde_json::to_value(request)?)
+                .transform_validated(
+                    HOOK_MODEL_REQUEST_PREPARE,
+                    Some(iteration),
+                    serde_json::to_value(request)?,
+                    validate_model_request,
+                )
                 .await?;
-            let request: CreateResponseBody = serde_json::from_value(request)?;
+            if transformed.control == FlowControl::Stop {
+                break;
+            }
+            if transformed.control == FlowControl::Skip {
+                continue;
+            }
+            let request: CreateResponseBody = serde_json::from_value(transformed.payload)?;
 
             let mut stream = self
                 .client
                 .stream_response(request)
                 .await
                 .map_err(AgentError::from)?;
-
-            let mut iter_text = String::new();
-            let mut pending_tool_calls: Vec<(String, String, String)> = Vec::new(); // (id, name, args)
-
+            let mut text = String::new();
+            let mut response_items = Vec::new();
             while let Some(event_result) = stream.next().await {
-                let event = match event_result {
-                    Ok(e) => e,
-                    Err(e) => {
-                        let err_str = e.to_string();
-                        self.event_handler
-                            .on_event(&AgentEvent::Error { error: err_str });
-                        return Err(AgentError::from(e));
-                    }
-                };
-
-                match event {
-                    StreamingEvent::OutputItemAdded {
-                        item:
-                            Some(Item::FunctionCall {
-                                call_id,
-                                name,
-                                arguments,
-                                ..
-                            }),
-                        ..
-                    } => pending_tool_calls.push((call_id, name, arguments)),
-                    StreamingEvent::OutputItemDone {
-                        item: Some(item), ..
-                    } => {
-                        if let Item::FunctionCall {
-                            call_id,
-                            name,
-                            arguments,
-                            ..
-                        } = &item
-                        {
-                            if let Some(pos) = pending_tool_calls
-                                .iter()
-                                .position(|(id, _, _)| *id == *call_id)
-                            {
-                                pending_tool_calls[pos] =
-                                    (call_id.clone(), name.clone(), arguments.clone());
-                            } else {
-                                pending_tool_calls.push((
-                                    call_id.clone(),
-                                    name.clone(),
-                                    arguments.clone(),
-                                ));
-                            }
-                        }
-                        self.context.add_item(item);
-                    }
+                let event = event_result.map_err(AgentError::from)?;
+                let observed = match &event {
                     StreamingEvent::OutputTextDelta { delta, .. } => {
-                        iter_text.push_str(&delta);
+                        serde_json::json!({"type":"text_delta", "delta":delta})
+                    }
+                    StreamingEvent::OutputItemAdded { item, .. } => {
+                        serde_json::json!({"type":"output_item_added", "item": item})
+                    }
+                    StreamingEvent::OutputItemDone { item, .. } => {
+                        serde_json::json!({"type":"output_item_done", "item": item})
+                    }
+                    StreamingEvent::Error { error, .. } => {
+                        serde_json::json!({"type":"error", "message":error.message})
+                    }
+                    _ => serde_json::json!({"type":"other"}),
+                };
+                self.extension_manager
+                    .observe(HOOK_MODEL_STREAM_OBSERVE, Some(iteration), observed)
+                    .await?;
+                match event {
+                    StreamingEvent::OutputTextDelta { delta, .. } => {
+                        text.push_str(&delta);
                         self.event_handler
                             .on_event(&AgentEvent::TextDelta { delta });
                     }
+                    StreamingEvent::OutputItemDone {
+                        item: Some(item), ..
+                    } => response_items.push(item),
                     StreamingEvent::Error { error, .. } => {
-                        let err_msg = error.message;
-                        self.event_handler.on_event(&AgentEvent::Error {
-                            error: err_msg.clone(),
-                        });
-                        return Err(AgentError::ResponseFailed(err_msg));
+                        return Err(AgentError::ResponseFailed(error.message))
                     }
                     _ => {}
                 }
             }
+            drop(stream);
 
-            if !iter_text.is_empty() {
-                last_response_text = iter_text.clone();
-            }
-
-            self.event_handler.on_event(&AgentEvent::TurnCompleted {
-                iteration,
-                text: iter_text.clone(),
-            });
-            self.extension_manager
-                .observe(
-                    HOOK_MODEL_RESPONSE,
-                    serde_json::json!({"iteration": iteration, "text": iter_text}),
+            let transformed = self
+                .extension_manager
+                .transform_validated(
+                    HOOK_MODEL_RESPONSE_PREPARE,
+                    Some(iteration),
+                    serde_json::json!({"text": text, "items": response_items}),
+                    validate_model_response,
                 )
                 .await?;
-
-            // 执行这一轮收集到的所有 WASM 工具调用
-            if !pending_tool_calls.is_empty() {
-                let mut tool_futures = Vec::new();
-
-                for (call_id, name, args) in pending_tool_calls {
-                    let event_handler = Arc::clone(&self.event_handler);
-                    let ext_manager = &self.extension_manager;
-                    let owner_map = &active_owner_map;
-
-                    tool_futures.push(async move {
-                        event_handler.on_event(&AgentEvent::ToolCallStarted {
-                            call_id: call_id.clone(),
-                            tool_name: name.clone(),
-                            arguments: args.clone(),
-                        });
-
-                        let t_start = Instant::now();
-                        let result = match serde_json::from_str(&args) {
-                            Ok(arguments) => {
-                                ext_manager.execute_tool(owner_map, &name, arguments).await
-                            }
-                            Err(error) => Ok(crate::wasm::ToolResult::err(format!(
-                                "invalid tool arguments: {error}"
-                            ))),
-                        };
-
-                        match result {
-                            Ok(res) => {
-                                let transformed = ext_manager
-                                    .transform(
-                                        HOOK_TOOL_RESULT_TRANSFORM,
-                                        serde_json::to_value(&res).unwrap_or_default(),
-                                    )
-                                    .await;
-                                let res = transformed
-                                    .and_then(|value| {
-                                        serde_json::from_value(value).map_err(AgentError::JsonError)
-                                    })
-                                    .unwrap_or_else(|error| {
-                                        crate::wasm::ToolResult::err(error.to_string())
-                                    });
-                                event_handler.on_event(&AgentEvent::ToolCallFinished {
-                                    call_id: call_id.clone(),
-                                    tool_name: name.clone(),
-                                    output: res.output.clone(),
-                                    is_error: !res.success,
-                                    duration_ms: t_start.elapsed().as_millis(),
-                                });
-
-                                (call_id, res.output)
-                            }
-                            Err(e) => {
-                                let err_output = format!("工具执行失败: {}", e);
-                                event_handler.on_event(&AgentEvent::ToolCallFinished {
-                                    call_id: call_id.clone(),
-                                    tool_name: name.clone(),
-                                    output: err_output.clone(),
-                                    is_error: true,
-                                    duration_ms: t_start.elapsed().as_millis(),
-                                });
-
-                                (call_id, err_output)
-                            }
-                        }
-                    });
-                }
-
-                let executed_results = join_all(tool_futures).await;
-
-                for (call_id, output) in executed_results {
-                    let function_output = Item::FunctionCallOutput {
-                        id: None,
-                        call_id,
-                        output: FunctionOutput::Text(output),
-                        status: None,
-                    };
-                    self.context.add_item(function_output);
-                }
-
-                self.event_handler
-                    .on_event(&AgentEvent::RoundCompleted { iteration });
-                self.extension_manager
-                    .observe(
-                        HOOK_LOOP_AFTER,
-                        serde_json::json!({"iteration": iteration, "called_tools": true}),
-                    )
-                    .await?;
-                // 继续下一轮 ReAct 迭代
+            if transformed.control == FlowControl::Stop {
+                break;
+            }
+            if transformed.control == FlowControl::Skip {
                 continue;
+            }
+            let response_text = transformed
+                .payload
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let response_items: Vec<Item> =
+                serde_json::from_value(transformed.payload.get("items").cloned().ok_or_else(
+                    || AgentError::ToolError("model.response.prepare must return 'items'".into()),
+                )?)?;
+            if !response_text.is_empty() {
+                last_response_text = response_text.clone();
+            }
+            let response_commit = self
+                .commit_context("model_response", response_items.clone(), Some(iteration))
+                .await?;
+            match response_commit {
+                FlowControl::Stop => break,
+                FlowControl::Skip => continue,
+                FlowControl::Continue => {}
+            }
+            self.event_handler.on_event(&AgentEvent::TurnCompleted {
+                iteration,
+                text: response_text.clone(),
+            });
+
+            let calls = response_items
+                .into_iter()
+                .filter_map(|item| match item {
+                    Item::FunctionCall {
+                        call_id,
+                        name,
+                        arguments,
+                        ..
+                    } => Some((call_id, name, arguments)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let called_tools = !calls.is_empty();
+            if called_tools {
+                let mut outputs = Vec::new();
+                let mut stop = false;
+                for (call_id, name, arguments) in calls {
+                    let (output, control) = self
+                        .execute_tool_call(iteration, &active_tools, call_id, name, arguments)
+                        .await?;
+                    if let Some(output) = output {
+                        outputs.push(output);
+                    }
+                    if control == FlowControl::Stop {
+                        stop = true;
+                        break;
+                    }
+                }
+                if !outputs.is_empty() {
+                    stop = self
+                        .commit_context("tool_results", outputs, Some(iteration))
+                        .await?
+                        != FlowControl::Continue;
+                }
+                if stop {
+                    break;
+                }
             }
 
             self.event_handler
                 .on_event(&AgentEvent::RoundCompleted { iteration });
-
-            self.extension_manager
-                .observe(
-                    HOOK_LOOP_AFTER,
-                    serde_json::json!({"iteration": iteration, "called_tools": false}),
+            let complete = self
+                .extension_manager
+                .transform_validated(
+                    HOOK_TURN_COMPLETE,
+                    Some(iteration),
+                    serde_json::json!({"iteration":iteration, "called_tools":called_tools, "continue_loop":called_tools}),
+                    |value| {
+                        value
+                            .get("continue_loop")
+                            .and_then(Value::as_bool)
+                            .map(|_| ())
+                            .ok_or_else(|| "continue_loop must be boolean".into())
+                    },
                 )
                 .await?;
-
-            // 无工具调用，检查延迟输入队列
-            if let Ok(delayed_msg) = self.delayed_rx.try_recv() {
-                self.event_handler.on_event(&AgentEvent::MessageReceived {
-                    content: delayed_msg.clone(),
-                    is_delayed: true,
-                });
-                self.context.add_user_message(delayed_msg);
-                continue;
+            if complete.control == FlowControl::Stop {
+                break;
             }
-
-            // 迭代结束
-            break;
+            let mut continue_loop = complete
+                .payload
+                .get("continue_loop")
+                .and_then(Value::as_bool)
+                .unwrap_or(called_tools);
+            if !called_tools {
+                if let Ok(input) = self.delayed_rx.try_recv() {
+                    if self.accept_input(input, true).await? == FlowControl::Stop {
+                        break;
+                    }
+                    continue_loop = true;
+                }
+            }
+            if !continue_loop {
+                break;
+            }
         }
-
         self.event_handler.on_event(&AgentEvent::AgentFinished);
-
         Ok(last_response_text)
+    }
+
+    async fn execute_tool_call(
+        &self,
+        iteration: usize,
+        tools: &[ToolEntry],
+        call_id: String,
+        name: String,
+        args: String,
+    ) -> Result<(Option<Item>, FlowControl), AgentError> {
+        let started = Instant::now();
+        self.event_handler.on_event(&AgentEvent::ToolCallStarted {
+            call_id: call_id.clone(),
+            tool_name: name.clone(),
+            arguments: args.clone(),
+        });
+        let tool = tools
+            .iter()
+            .find(|tool| tool.definition.name == name)
+            .ok_or_else(|| AgentError::ToolNotFound(name.clone()))?;
+        let arguments = serde_json::from_str(&args)
+            .map_err(|e| AgentError::ToolError(format!("invalid tool arguments: {e}")))?;
+        let initial = ToolCallRequest {
+            call_id: call_id.clone(),
+            tool_id: tool.id.clone().unwrap_or_default(),
+            name: name.clone(),
+            arguments,
+        };
+        let transformed = self
+            .extension_manager
+            .transform_validated(
+                HOOK_TOOL_CALL_PREPARE,
+                Some(iteration),
+                serde_json::to_value(&initial)?,
+                |value| {
+                    serde_json::from_value::<ToolCallRequest>(value.clone())
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                },
+            )
+            .await?;
+        match transformed.control {
+            FlowControl::Stop => return Ok((None, FlowControl::Stop)),
+            FlowControl::Skip => {
+                return Ok((
+                    Some(Item::FunctionCallOutput {
+                        id: None,
+                        call_id,
+                        output: FunctionOutput::Text("tool call skipped by extension".into()),
+                        status: None,
+                    }),
+                    FlowControl::Continue,
+                ));
+            }
+            FlowControl::Continue => {}
+        }
+        let mut call: ToolCallRequest = serde_json::from_value(transformed.payload)?;
+        if call.call_id != initial.call_id || call.tool_id != initial.tool_id {
+            return Err(AgentError::ToolError(
+                "tool.call.prepare cannot change call_id or tool_id".into(),
+            ));
+        }
+        call.name = tool.definition.name.clone();
+        let owner = tool
+            .owner
+            .as_deref()
+            .ok_or_else(|| AgentError::ToolError("tool has no owner".into()))?;
+        let value = self
+            .extension_manager
+            .action(
+                HOOK_TOOLS_CALL,
+                owner,
+                Some(iteration),
+                serde_json::to_value(&call)?,
+            )
+            .await?;
+        if transformed.control == FlowControl::Stop {
+            return Ok((None, FlowControl::Stop));
+        }
+        let result: ToolResult = serde_json::from_value(value)?;
+        let transformed = self
+            .extension_manager
+            .transform_validated(
+                HOOK_TOOL_RESULT_PREPARE,
+                Some(iteration),
+                serde_json::json!({
+                    "call": call, "result": result
+                }),
+                |value| {
+                    value
+                        .get("result")
+                        .cloned()
+                        .ok_or_else(|| "missing result".into())
+                        .and_then(|result| {
+                            serde_json::from_value::<ToolResult>(result)
+                                .map(|_| ())
+                                .map_err(|error| error.to_string())
+                        })
+                },
+            )
+            .await?;
+        let result: ToolResult =
+            serde_json::from_value(transformed.payload.get("result").cloned().ok_or_else(
+                || AgentError::ToolError("tool.result.prepare must return 'result'".into()),
+            )?)?;
+        self.event_handler.on_event(&AgentEvent::ToolCallFinished {
+            call_id: call_id.clone(),
+            tool_name: name,
+            output: result.output.clone(),
+            is_error: !result.success,
+            duration_ms: started.elapsed().as_millis(),
+        });
+        Ok((
+            Some(Item::FunctionCallOutput {
+                id: None,
+                call_id,
+                output: FunctionOutput::Text(result.output),
+                status: None,
+            }),
+            FlowControl::Continue,
+        ))
+    }
+}
+
+fn validate_model_request(value: &Value) -> Result<(), String> {
+    let request: CreateResponseBody =
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+    if request.model.as_deref().is_none_or(str::is_empty) {
+        return Err("model must not be empty".into());
+    }
+    if request
+        .temperature
+        .is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value))
+    {
+        return Err("temperature must be between 0 and 2".into());
+    }
+    if request.max_output_tokens.is_some_and(|value| value <= 0) {
+        return Err("max_output_tokens must be positive".into());
+    }
+    Ok(())
+}
+
+fn validate_model_response(value: &Value) -> Result<(), String> {
+    if !value.get("text").is_some_and(Value::is_string) {
+        return Err("text must be a string".into());
+    }
+    let items = value
+        .get("items")
+        .cloned()
+        .ok_or_else(|| "missing items".to_string())?;
+    serde_json::from_value::<Vec<Item>>(items)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn validate_context_commit(value: &Value) -> Result<(), String> {
+    let items: Vec<Item> = serde_json::from_value(
+        value
+            .get("next")
+            .cloned()
+            .ok_or_else(|| "missing next".to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut calls = std::collections::HashSet::new();
+    for item in items {
+        match item {
+            Item::Message { role, .. } if format!("{role:?}").eq_ignore_ascii_case("system") => {
+                return Err("system messages must stay outside context items".into());
+            }
+            Item::FunctionCall { call_id, .. } if !calls.insert(call_id.clone()) => {
+                return Err("duplicate function call_id".into());
+            }
+            Item::FunctionCallOutput { call_id, .. } if !calls.contains(&call_id) => {
+                return Err(format!(
+                    "function output references unknown call_id '{call_id}'"
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod hook_validation_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_invalid_model_parameters() {
+        let request = CreateResponseBody {
+            model: Some("test".into()),
+            temperature: Some(3.0),
+            ..Default::default()
+        };
+        assert!(validate_model_request(&serde_json::to_value(request).unwrap()).is_err());
+    }
+
+    #[test]
+    fn context_commit_rejects_unknown_tool_output() {
+        let output = Item::FunctionCallOutput {
+            id: None,
+            call_id: "missing".into(),
+            output: FunctionOutput::Text("result".into()),
+            status: None,
+        };
+        assert!(validate_context_commit(&serde_json::json!({"next": [output]})).is_err());
+    }
+
+    #[test]
+    fn context_commit_accepts_matching_tool_output() {
+        let call = Item::FunctionCall {
+            id: None,
+            call_id: "call-1".into(),
+            name: "shell".into(),
+            arguments: "{}".into(),
+            status: None,
+        };
+        let output = Item::FunctionCallOutput {
+            id: None,
+            call_id: "call-1".into(),
+            output: FunctionOutput::Text("result".into()),
+            status: None,
+        };
+        assert!(validate_context_commit(&serde_json::json!({"next": [call, output]})).is_ok());
     }
 }
