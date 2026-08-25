@@ -16,23 +16,16 @@ wasmtime::component::bindgen!({
 struct HostState;
 
 impl ragent::extension::host::Host for HostState {
-    async fn execute_command(&mut self, command: String) -> ragent::extension::host::CommandOutput {
-        execute_command(command, 0).await
-    }
-
     async fn execute_command_with_timeout(
         &mut self,
         command: String,
         timeout_ms: u64,
     ) -> ragent::extension::host::CommandOutput {
-        execute_command(command, timeout_ms).await
+        run_command(command, timeout_ms).await
     }
 }
 
-async fn execute_command(
-    command: String,
-    timeout_ms: u64,
-) -> ragent::extension::host::CommandOutput {
+async fn run_command(command: String, timeout_ms: u64) -> ragent::extension::host::CommandOutput {
     let mut child = tokio::process::Command::new("sh");
     child.arg("-c").arg(command).kill_on_drop(true);
     let output = if timeout_ms == 0 {

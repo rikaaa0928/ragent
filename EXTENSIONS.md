@@ -15,7 +15,7 @@ The Agent core only owns model I/O, context commits, and loop control. Extension
 - pending context commits;
 - the decision to continue the loop.
 
-WASM is a cross-language extension format here, not a security sandbox. Host capabilities are determined by WIT imports. The current host provides `host.execute-command` and `host.execute-command-with-timeout`, which execute commands directly on the host through `sh -c`. Do not load an untrusted Shell extension.
+WASM is a cross-language extension format here, not a security sandbox. Host capabilities are determined by WIT imports. The current host provides only `host.execute-command-with-timeout`, which executes commands directly on the host through `sh -c`. Do not load an untrusted Shell extension.
 
 ## 2. Component ABI
 
@@ -32,7 +32,6 @@ interface host {
         error: option<string>,
     }
 
-    execute-command: func(command: string) -> command-output;
     execute-command-with-timeout: func(command: string, timeout-ms: u64) -> command-output;
 }
 
@@ -320,7 +319,7 @@ interface AgentErrorPayload {
 }
 ```
 
-`HostCommandOutput` is not a JSON Hook payload; it is the WIT record returned by either host command function. `exit_code` above is pseudocode. Generated bindings may call it `exitCode`, `exit_code`, or another language-native spelling; the WIT field is `exit-code`. `execute-command` is retained with its original no-timeout behavior for compatibility. `execute-command-with-timeout` uses `timeout-ms = 0` to mean no timeout. `ExtensionConfigItem` and `ExtensionsConfig` describe the logical structure deserialized from TOML. Only an individual entry's `config` value is serialized to JSON and passed to that extension.
+`HostCommandOutput` is not a JSON Hook payload; it is the WIT record returned by `host.execute-command-with-timeout`. `exit_code` above is pseudocode. Generated bindings may call it `exitCode`, `exit_code`, or another language-native spelling; the WIT field is `exit-code`. `timeout-ms = 0` means no timeout. `ExtensionConfigItem` and `ExtensionsConfig` describe the logical structure deserialized from TOML. Only an individual entry's `config` value is serialized to JSON and passed to that extension.
 
 ### 4.6 Open Responses request structures
 

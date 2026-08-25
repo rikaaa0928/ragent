@@ -15,7 +15,7 @@ Agent 本体只负责模型 I/O、上下文提交和循环控制。扩展可以�
 - 待提交的上下文
 - 是否继续下一轮
 
-WASM 在这里是跨语言扩展载体，不是安全沙箱。扩展能否执行某项宿主能力由 WIT import 决定；当前宿主提供 `host.execute-command` 和 `host.execute-command-with-timeout`，它们会直接在宿主机上通过 `sh -c` 执行命令。不要加载不受信任的 Shell 扩展。
+WASM 在这里是跨语言扩展载体，不是安全沙箱。扩展能否执行某项宿主能力由 WIT import 决定；当前宿主只提供 `host.execute-command-with-timeout`，它会直接在宿主机上通过 `sh -c` 执行命令。不要加载不受信任的 Shell 扩展。
 
 ## 2. Component ABI
 
@@ -32,7 +32,6 @@ interface host {
         error: option<string>,
     }
 
-    execute-command: func(command: string) -> command-output;
     execute-command-with-timeout: func(command: string, timeout-ms: u64) -> command-output;
 }
 
@@ -320,7 +319,7 @@ interface AgentErrorPayload {
 }
 ```
 
-`HostCommandOutput` 不是 JSON Hook payload，而是两个宿主命令函数返回的 WIT record。上面的 `exit_code` 是伪代码名称；实际生成的语言绑定可能使用 `exitCode`、`exit_code` 等本语言命名方式，对应的 WIT 字段是 `exit-code`。为保持兼容而保留的 `execute-command` 延续原有的不超时行为；`execute-command-with-timeout` 中 `timeout-ms = 0` 表示不启用超时。`ExtensionConfigItem` 和 `ExtensionsConfig` 描述 TOML 配置反序列化后的逻辑结构，其中只有单个条目的 `config` 会被序列化成 JSON 传给该扩展。
+`HostCommandOutput` 不是 JSON Hook payload，而是 `host.execute-command-with-timeout` 返回的 WIT record。上面的 `exit_code` 是伪代码名称；实际生成的语言绑定可能使用 `exitCode`、`exit_code` 等本语言命名方式，对应的 WIT 字段是 `exit-code`。`timeout-ms = 0` 表示不启用超时。`ExtensionConfigItem` 和 `ExtensionsConfig` 描述 TOML 配置反序列化后的逻辑结构，其中只有单个条目的 `config` 会被序列化成 JSON 传给该扩展。
 
 ### 4.6 Open Responses 请求结构
 
