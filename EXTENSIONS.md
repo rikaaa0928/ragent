@@ -155,6 +155,406 @@ Actions perform side effects. The core routes an Action to exactly one immutable
 
 Observers are broadcast concurrently. Their returned values never change the flow. Invocation errors propagate with `abort` and are discarded with `ignore`.
 
+### 4.4 JSON type notation
+
+The following sections use TypeScript syntax to describe wire JSON. Extensions do not need to be written in TypeScript:
+
+- `field?: T` means that the field may be omitted.
+- `T | null` means that an explicitly present field may contain JSON `null`.
+- `JsonValue` means any valid JSON value.
+- Integers must fit the range stated by their target field. JavaScript implementations should treat `invocation_id` as a safe integer.
+- Fields not marked optional are required. Do not assume that unknown fields are preserved unless the type explicitly contains `[key: string]`.
+
+```ts
+type JsonPrimitive = null | boolean | number | string;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+
+type HookKind = "transform" | "action" | "observer";
+type HookFailurePolicy = "abort" | "ignore";
+type HookAction = "continue" | "unchanged" | "reject" | "skip" | "stop";
+
+interface HookSubscription {
+  hook: string;
+  kind: HookKind;
+  priority?: number;             // defaults to 0; signed 32-bit integer
+  failure?: HookFailurePolicy;   // defaults to "abort"
+}
+
+interface ExtensionMetadata {
+  id: string;
+  version: string;
+  subscriptions?: HookSubscription[]; // defaults to []
+}
+
+interface ExtensionConfigItem {
+  name: string;
+  path: string;
+  enabled?: boolean;             // defaults to true
+  config?: JsonValue;            // defaults to null; passed to initialize
+}
+
+interface ExtensionsConfig {
+  extensions?: ExtensionConfigItem[]; // defaults to []
+}
+
+interface HookRequest<P = JsonValue> {
+  hook: string;
+  protocol_version: 1;
+  invocation_id: number;         // host u64; correlation identifier
+  iteration?: number;            // present only for turn-scoped Hooks
+  payload: P;
+}
+
+interface HookResult<P = JsonValue> {
+  action: HookAction;
+  payload?: P;                   // required for continue
+  reason?: string;               // recommended for reject
+}
+```
+
+`metadata()` returns an `ExtensionMetadata` JSON string. `initialize()` receives a JSON string containing any `JsonValue`. `invoke()` receives a `HookRequest` string and returns a `HookResult` string in the WIT `ok` branch.
+
+### 4.5 ragent core data structures
+
+```ts
+interface ModelDraft {
+  name: string;
+  temperature?: number | null;       // present in core output; null or 0..=2
+  max_output_tokens?: number | null; // present in core output; null or positive i32
+}
+
+interface HostCommandOutput {
+  exit_code: number;                  // WIT s32
+  stdout: string;
+  stderr: string;
+  error: string | null;
+}
+
+interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: JsonValue;             // JSON Schema with top-level type="object"
+}
+
+interface ToolEntry extends ToolDefinition {
+  id?: string;                       // omit for new tools; preserve after core assignment
+  owner?: string;                    // omit for new tools; managed by the core
+  enabled?: boolean;                 // defaults to true
+}
+
+interface ContextView {
+  items_count: number;
+  recent_messages: Array<{
+    role: string;
+    content: string;
+  }>;
+}
+
+interface TurnContext {
+  items: Item[];
+  view: ContextView;
+}
+
+interface AgentDraft {
+  system_prompt: string;
+  model: ModelDraft;
+  tools?: ToolEntry[];               // defaults to []
+  context?: TurnContext;             // omitted in agent.prepare; present and read-only in turn.prepare
+}
+
+interface InputPreparePayload {
+  text: string;
+  delayed: boolean;
+}
+
+interface ModelResponsePayload {
+  text: string;
+  items: Item[];
+}
+
+interface ToolCallRequest {
+  call_id: string;
+  tool_id: string;
+  name: string;
+  arguments: JsonValue;
+}
+
+interface ToolResult {
+  success: boolean;
+  output: string;
+  error?: string | null;
+}
+
+interface ToolResultPreparePayload {
+  call: ToolCallRequest;
+  result: ToolResult;
+}
+
+type ContextCommitReason = "input" | "model_response" | "tool_results";
+
+interface ContextCommitPayload {
+  reason: ContextCommitReason;
+  current: Item[];
+  pending: Item[];
+  next: Item[];
+}
+
+interface TurnCompletePayload {
+  iteration: number;
+  called_tools: boolean;
+  continue_loop: boolean;
+}
+
+interface AgentErrorPayload {
+  error: string;
+}
+```
+
+`HostCommandOutput` is not a JSON Hook payload; it is the WIT record returned by `host.execute-command`. `exit_code` above is pseudocode. Generated bindings may call it `exitCode`, `exit_code`, or another language-native spelling; the WIT field is `exit-code`. `ExtensionConfigItem` and `ExtensionsConfig` describe the logical structure deserialized from TOML. Only an individual entry's `config` value is serialized to JSON and passed to that extension.
+
+### 4.6 Open Responses request structures
+
+The `model.request.prepare` payload is a complete `CreateResponseBody`. The core initially sets only `model`, `input`, `instructions`, function tools, `tool_choice`, `temperature`, `max_output_tokens`, and `stream=true`, but an extension may operate on every supported field below:
+
+```ts
+type IncludeOption =
+  | "reasoning.encrypted_content"
+  | "message.output_text.logprobs";
+
+type ToolChoice = "none" | "auto" | "required";
+type Truncation = "auto" | "disabled";
+type ServiceTier = "auto" | "default" | "flex" | "priority";
+type Verbosity = "low" | "medium" | "high";
+type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
+type ReasoningSummary = "concise" | "detailed" | "auto";
+
+interface FunctionTool {
+  type: "function";
+  name: string;
+  description?: string;
+  parameters?: JsonValue;
+  strict?: boolean;
+}
+
+interface McpTool {
+  type: "mcp";
+  server_label: string;
+  server_url: string;
+  allowed_tools?: string[];
+}
+
+interface ExtensionRequestTool {
+  type: string;                       // any type other than function/mcp
+  [key: string]: JsonValue;
+}
+
+type RequestTool = FunctionTool | McpTool | ExtensionRequestTool;
+
+type ToolChoiceParam =
+  | ToolChoice
+  | { type: string; name: string }
+  | {
+      type: string;
+      tools: Array<{ type: string; name: string }>;
+      mode?: ToolChoice;
+    };
+
+type TextFormat =
+  | { type: "text" }
+  | { type: "json_object" }
+  | {
+      type: "json_schema";
+      name: string;
+      description?: string;
+      schema?: JsonValue;
+      strict?: boolean;
+    };
+
+interface TextParam {
+  format?: TextFormat;
+  verbosity?: Verbosity;              // deserialization default: medium
+}
+
+interface ReasoningConfig {
+  effort?: ReasoningEffort;
+  summary?: ReasoningSummary;
+}
+
+interface CreateResponseBody {
+  model?: string;
+  input?: string | Item[];
+  previous_response_id?: string;
+  include?: IncludeOption[];
+  tools?: RequestTool[];
+  tool_choice?: ToolChoiceParam;
+  metadata?: { [key: string]: string };
+  text?: TextParam;
+  temperature?: number;
+  top_p?: number;
+  presence_penalty?: number;
+  frequency_penalty?: number;
+  parallel_tool_calls?: boolean;
+  stream?: boolean;
+  stream_options?: { include_obfuscation?: boolean | null };
+  background?: boolean;
+  max_output_tokens?: number;
+  max_tool_calls?: number;
+  reasoning?: ReasoningConfig;
+  safety_identifier?: string;
+  prompt_cache_key?: string;
+  truncation?: Truncation;             // omitted input defaults to auto; present in core output
+  instructions?: string;
+  store?: boolean;
+  service_tier?: ServiceTier;          // omitted input defaults to auto; present in core output
+  top_logprobs?: number;
+}
+```
+
+The result must deserialize to this structure. The core additionally requires a present, non-empty `model`, valid `temperature`, and positive `max_output_tokens`. The Agent streaming loop depends on `stream=true`; extensions should not disable it.
+
+### 4.7 Complete Context Item structure
+
+`AgentDraft.context.items`, `model.response.prepare.items`, and `context.commit` use this `Item` union. Every Item is discriminated by the string field `type`:
+
+```ts
+type ItemStatus = "in_progress" | "completed" | "incomplete";
+type MessageRole = "user" | "assistant" | "system" | "developer";
+type MessagePhase = "commentary" | "final_answer";
+type ImageDetail = "low" | "high" | "auto";
+
+interface UrlCitation {
+  type: "url_citation";
+  url: string;
+  title: string;
+  start_index: number;
+  end_index: number;
+}
+
+interface TopLogProb {
+  token: string;
+  logprob: number;
+  bytes: number[];
+}
+
+interface LogProb extends TopLogProb {
+  top_logprobs: TopLogProb[];
+}
+
+type MessageContent =
+  | { type: "input_text"; text: string }
+  | { type: "input_image"; image_url?: string; detail?: ImageDetail }
+  | { type: "input_file"; filename?: string; file_data?: string; file_url?: string }
+  | { type: "input_video"; video_url: string }
+  | {
+      type: "output_text";
+      text: string;
+      annotations?: UrlCitation[];
+      logprobs?: LogProb[];
+    }
+  | { type: "refusal"; refusal: string }
+  | { type: "text"; text: string }
+  | { type: "summary_text"; text: string }
+  | { type: "reasoning_text"; text: string };
+
+interface MessageItem {
+  type: "message";
+  id?: string;
+  status?: ItemStatus;
+  role: MessageRole;
+  content: MessageContent[] | string;  // serialized output is always an array
+  phase?: MessagePhase;
+}
+
+interface FunctionCallItem {
+  type: "function_call";
+  id?: string;
+  call_id: string;
+  name: string;
+  arguments: string;                   // JSON-encoded string, not a JSON object
+  status?: ItemStatus;
+}
+
+interface FunctionCallOutputItem {
+  type: "function_call_output";
+  id?: string;
+  call_id: string;
+  output: string | MessageContent[];
+  status?: ItemStatus;
+}
+
+interface ReasoningItem {
+  type: "reasoning";
+  id?: string;
+  status?: ItemStatus;
+  content?: MessageContent[];
+  summary: MessageContent[];
+  encrypted_content?: string;
+}
+
+interface CompactionItem {
+  type: "compaction";
+  id?: string;
+  encrypted_content: string;
+  created_by?: string;
+}
+
+interface ItemReference {
+  type: "item_reference";
+  id: string;
+}
+
+interface ExtensionItem {
+  type: string;                         // any type other than the built-in variants above
+  id?: string;
+  status?: string;
+  [key: string]: JsonValue;
+}
+
+type Item =
+  | MessageItem
+  | FunctionCallItem
+  | FunctionCallOutputItem
+  | ReasoningItem
+  | CompactionItem
+  | ItemReference
+  | ExtensionItem;
+```
+
+Message content is also role-constrained: `user` permits the four `input_*` variants; `system` and `developer` permit only `input_text`; `assistant` permits only `output_text` or `refusal`. When `FunctionCallOutputItem.output` is an array, it may contain only the four `input_*` variants. A `context.commit.next` value cannot contain a Message with `role="system"`; modify the System Prompt through AgentDraft or request `instructions`.
+
+### 4.8 Observer event structures
+
+```ts
+type ModelStreamEvent =
+  | { type: "text_delta"; delta: string }
+  | { type: "output_item_added"; item: Item | null }
+  | { type: "output_item_done"; item: Item | null }
+  | { type: "error"; message: string }
+  | { type: "other" };
+
+type AgentShutdownPayload = Record<string, never>; // JSON {}
+```
+
+Complete Hook-to-payload mapping:
+
+```ts
+interface HookPayloadMap {
+  "agent.prepare": AgentDraft;
+  "input.prepare": InputPreparePayload;
+  "turn.prepare": AgentDraft;
+  "model.request.prepare": CreateResponseBody;
+  "model.stream.observe": ModelStreamEvent;
+  "model.response.prepare": ModelResponsePayload;
+  "tool.call.prepare": ToolCallRequest;
+  "tools.call": ToolCallRequest;                 // Action result: ToolResult
+  "tool.result.prepare": ToolResultPreparePayload;
+  "context.commit": ContextCommitPayload;
+  "turn.complete": TurnCompletePayload;
+  "agent.error": AgentErrorPayload;
+  "agent.shutdown": AgentShutdownPayload;
+}
+```
+
 ## 5. AgentDraft and tool ownership
 
 `agent.prepare` and `turn.prepare` share one AgentDraft shape:
@@ -167,8 +567,7 @@ Observers are broadcast concurrently. Their returned values never change the flo
     "temperature": null,
     "max_output_tokens": null
   },
-  "tools": [],
-  "context": null
+  "tools": []
 }
 ```
 

@@ -155,6 +155,406 @@ Observer 的返回值被忽略，但 `invoke()` 的成功分支仍必须返回�
 
 向所有订阅者并发广播。返回内容不参与流程；`abort` 策略下调用错误仍会传播，`ignore` 下忽略该扩展错误。
 
+### 4.4 JSON 类型约定
+
+下文使用 TypeScript 语法描述线上的 JSON，而不是要求扩展使用 TypeScript：
+
+- `field?: T` 表示字段可以省略。
+- `T | null` 表示字段存在时允许为 JSON `null`。
+- `JsonValue` 表示任意合法 JSON 值。
+- 所有整数都必须在目标字段注明的范围内；`invocation_id` 在 JavaScript 中应按安全整数处理。
+- 未注明可省略的字段必须存在。扩展不应依赖未知字段被保留，除非类型明确包含 `[key: string]`。
+
+```ts
+type JsonPrimitive = null | boolean | number | string;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+
+type HookKind = "transform" | "action" | "observer";
+type HookFailurePolicy = "abort" | "ignore";
+type HookAction = "continue" | "unchanged" | "reject" | "skip" | "stop";
+
+interface HookSubscription {
+  hook: string;
+  kind: HookKind;
+  priority?: number;             // 省略时为 0，必须是有符号 32 位整数
+  failure?: HookFailurePolicy;   // 省略时为 "abort"
+}
+
+interface ExtensionMetadata {
+  id: string;
+  version: string;
+  subscriptions?: HookSubscription[]; // 省略时为空数组
+}
+
+interface ExtensionConfigItem {
+  name: string;
+  path: string;
+  enabled?: boolean;             // 省略时为 true
+  config?: JsonValue;            // 省略时为 null；传给 initialize
+}
+
+interface ExtensionsConfig {
+  extensions?: ExtensionConfigItem[]; // 省略时为空数组
+}
+
+interface HookRequest<P = JsonValue> {
+  hook: string;
+  protocol_version: 1;
+  invocation_id: number;         // 宿主 u64；跨语言日志关联标识
+  iteration?: number;            // 轮次 Hook 才存在
+  payload: P;
+}
+
+interface HookResult<P = JsonValue> {
+  action: HookAction;
+  payload?: P;                   // continue 必须有；unchanged/reject/skip/stop 可省略
+  reason?: string;               // reject 建议提供
+}
+```
+
+`metadata()` 返回 `ExtensionMetadata` 的 JSON 字符串；`initialize()` 接收任意 `JsonValue` 的 JSON 字符串；`invoke()` 接收 `HookRequest` 字符串并在 WIT `ok` 中返回 `HookResult` 字符串。
+
+### 4.5 ragent 核心数据结构
+
+```ts
+interface ModelDraft {
+  name: string;
+  temperature?: number | null;       // 核心输出时存在；null 或 0..=2
+  max_output_tokens?: number | null; // 核心输出时存在；null 或正的 i32
+}
+
+interface HostCommandOutput {
+  exit_code: number;                  // WIT s32
+  stdout: string;
+  stderr: string;
+  error: string | null;
+}
+
+interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: JsonValue;             // 必须是顶层 type="object" 的 JSON Schema
+}
+
+interface ToolEntry extends ToolDefinition {
+  id?: string;                       // 新工具省略；核心分配后必须保留
+  owner?: string;                    // 新工具省略；核心管理，扩展不能接管
+  enabled?: boolean;                 // 省略时为 true
+}
+
+interface ContextView {
+  items_count: number;
+  recent_messages: Array<{
+    role: string;
+    content: string;
+  }>;
+}
+
+interface TurnContext {
+  items: Item[];
+  view: ContextView;
+}
+
+interface AgentDraft {
+  system_prompt: string;
+  model: ModelDraft;
+  tools?: ToolEntry[];               // 省略时为空数组
+  context?: TurnContext;             // agent.prepare 中省略；turn.prepare 中存在且只读
+}
+
+interface InputPreparePayload {
+  text: string;
+  delayed: boolean;
+}
+
+interface ModelResponsePayload {
+  text: string;
+  items: Item[];
+}
+
+interface ToolCallRequest {
+  call_id: string;
+  tool_id: string;
+  name: string;
+  arguments: JsonValue;
+}
+
+interface ToolResult {
+  success: boolean;
+  output: string;
+  error?: string | null;
+}
+
+interface ToolResultPreparePayload {
+  call: ToolCallRequest;
+  result: ToolResult;
+}
+
+type ContextCommitReason = "input" | "model_response" | "tool_results";
+
+interface ContextCommitPayload {
+  reason: ContextCommitReason;
+  current: Item[];
+  pending: Item[];
+  next: Item[];
+}
+
+interface TurnCompletePayload {
+  iteration: number;
+  called_tools: boolean;
+  continue_loop: boolean;
+}
+
+interface AgentErrorPayload {
+  error: string;
+}
+```
+
+`HostCommandOutput` 不是 JSON Hook payload，而是 `host.execute-command` 的 WIT record。上面的 `exit_code` 是伪代码名称；实际生成的语言绑定可能使用 `exitCode`、`exit_code` 等本语言命名方式，对应的 WIT 字段是 `exit-code`。`ExtensionConfigItem` 和 `ExtensionsConfig` 描述 TOML 配置反序列化后的逻辑结构，其中只有单个条目的 `config` 会被序列化成 JSON 传给该扩展。
+
+### 4.6 Open Responses 请求结构
+
+`model.request.prepare` 的 payload 是完整的 `CreateResponseBody`。核心初始只设置 `model`、`input`、`instructions`、函数工具、`tool_choice`、`temperature`、`max_output_tokens` 和 `stream=true`，但扩展可以操作以下所有受支持字段：
+
+```ts
+type IncludeOption =
+  | "reasoning.encrypted_content"
+  | "message.output_text.logprobs";
+
+type ToolChoice = "none" | "auto" | "required";
+type Truncation = "auto" | "disabled";
+type ServiceTier = "auto" | "default" | "flex" | "priority";
+type Verbosity = "low" | "medium" | "high";
+type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
+type ReasoningSummary = "concise" | "detailed" | "auto";
+
+interface FunctionTool {
+  type: "function";
+  name: string;
+  description?: string;
+  parameters?: JsonValue;
+  strict?: boolean;
+}
+
+interface McpTool {
+  type: "mcp";
+  server_label: string;
+  server_url: string;
+  allowed_tools?: string[];
+}
+
+interface ExtensionRequestTool {
+  type: string;                       // 除 function/mcp 外的类型
+  [key: string]: JsonValue;
+}
+
+type RequestTool = FunctionTool | McpTool | ExtensionRequestTool;
+
+type ToolChoiceParam =
+  | ToolChoice
+  | { type: string; name: string }
+  | {
+      type: string;
+      tools: Array<{ type: string; name: string }>;
+      mode?: ToolChoice;
+    };
+
+type TextFormat =
+  | { type: "text" }
+  | { type: "json_object" }
+  | {
+      type: "json_schema";
+      name: string;
+      description?: string;
+      schema?: JsonValue;
+      strict?: boolean;
+    };
+
+interface TextParam {
+  format?: TextFormat;
+  verbosity?: Verbosity;              // 反序列化默认 medium
+}
+
+interface ReasoningConfig {
+  effort?: ReasoningEffort;
+  summary?: ReasoningSummary;
+}
+
+interface CreateResponseBody {
+  model?: string;
+  input?: string | Item[];
+  previous_response_id?: string;
+  include?: IncludeOption[];
+  tools?: RequestTool[];
+  tool_choice?: ToolChoiceParam;
+  metadata?: { [key: string]: string };
+  text?: TextParam;
+  temperature?: number;
+  top_p?: number;
+  presence_penalty?: number;
+  frequency_penalty?: number;
+  parallel_tool_calls?: boolean;
+  stream?: boolean;
+  stream_options?: { include_obfuscation?: boolean | null };
+  background?: boolean;
+  max_output_tokens?: number;
+  max_tool_calls?: number;
+  reasoning?: ReasoningConfig;
+  safety_identifier?: string;
+  prompt_cache_key?: string;
+  truncation?: Truncation;             // 省略反序列化为 auto；核心序列化时存在
+  instructions?: string;
+  store?: boolean;
+  service_tier?: ServiceTier;          // 省略反序列化为 auto；核心序列化时存在
+  top_logprobs?: number;
+}
+```
+
+返回的请求必须能反序列化为上述结构。核心额外要求 `model` 存在且非空、`temperature` 合法、`max_output_tokens` 为正数。Agent 的流式循环依赖 `stream=true`；扩展不应将其关闭。
+
+### 4.7 Context Item 完整结构
+
+`AgentDraft.context.items`、`model.response.prepare.items` 和 `context.commit` 都使用以下 `Item` 联合类型。所有 Item 都通过字符串 `type` 区分：
+
+```ts
+type ItemStatus = "in_progress" | "completed" | "incomplete";
+type MessageRole = "user" | "assistant" | "system" | "developer";
+type MessagePhase = "commentary" | "final_answer";
+type ImageDetail = "low" | "high" | "auto";
+
+interface UrlCitation {
+  type: "url_citation";
+  url: string;
+  title: string;
+  start_index: number;
+  end_index: number;
+}
+
+interface TopLogProb {
+  token: string;
+  logprob: number;
+  bytes: number[];
+}
+
+interface LogProb extends TopLogProb {
+  top_logprobs: TopLogProb[];
+}
+
+type MessageContent =
+  | { type: "input_text"; text: string }
+  | { type: "input_image"; image_url?: string; detail?: ImageDetail }
+  | { type: "input_file"; filename?: string; file_data?: string; file_url?: string }
+  | { type: "input_video"; video_url: string }
+  | {
+      type: "output_text";
+      text: string;
+      annotations?: UrlCitation[];
+      logprobs?: LogProb[];
+    }
+  | { type: "refusal"; refusal: string }
+  | { type: "text"; text: string }
+  | { type: "summary_text"; text: string }
+  | { type: "reasoning_text"; text: string };
+
+interface MessageItem {
+  type: "message";
+  id?: string;
+  status?: ItemStatus;
+  role: MessageRole;
+  content: MessageContent[] | string;  // 序列化输出始终为数组
+  phase?: MessagePhase;
+}
+
+interface FunctionCallItem {
+  type: "function_call";
+  id?: string;
+  call_id: string;
+  name: string;
+  arguments: string;                   // JSON 编码后的字符串，不是 JSON 对象
+  status?: ItemStatus;
+}
+
+interface FunctionCallOutputItem {
+  type: "function_call_output";
+  id?: string;
+  call_id: string;
+  output: string | MessageContent[];
+  status?: ItemStatus;
+}
+
+interface ReasoningItem {
+  type: "reasoning";
+  id?: string;
+  status?: ItemStatus;
+  content?: MessageContent[];
+  summary: MessageContent[];
+  encrypted_content?: string;
+}
+
+interface CompactionItem {
+  type: "compaction";
+  id?: string;
+  encrypted_content: string;
+  created_by?: string;
+}
+
+interface ItemReference {
+  type: "item_reference";
+  id: string;
+}
+
+interface ExtensionItem {
+  type: string;                         // 除上述内置类型外的任意类型
+  id?: string;
+  status?: string;
+  [key: string]: JsonValue;
+}
+
+type Item =
+  | MessageItem
+  | FunctionCallItem
+  | FunctionCallOutputItem
+  | ReasoningItem
+  | CompactionItem
+  | ItemReference
+  | ExtensionItem;
+```
+
+Message 内容还受 role 约束：`user` 只允许四种 `input_*`；`system` 和 `developer` 只允许 `input_text`；`assistant` 只允许 `output_text` 或 `refusal`。`FunctionCallOutputItem.output` 为数组时只允许四种 `input_*`。`context.commit.next` 不允许 `role="system"` 的 Message；System Prompt 必须通过 AgentDraft 或请求 `instructions` 修改。
+
+### 4.8 Observer 事件结构
+
+```ts
+type ModelStreamEvent =
+  | { type: "text_delta"; delta: string }
+  | { type: "output_item_added"; item: Item | null }
+  | { type: "output_item_done"; item: Item | null }
+  | { type: "error"; message: string }
+  | { type: "other" };
+
+type AgentShutdownPayload = Record<string, never>; // JSON {}
+```
+
+Hook 与 payload 类型的完整映射：
+
+```ts
+interface HookPayloadMap {
+  "agent.prepare": AgentDraft;
+  "input.prepare": InputPreparePayload;
+  "turn.prepare": AgentDraft;
+  "model.request.prepare": CreateResponseBody;
+  "model.stream.observe": ModelStreamEvent;
+  "model.response.prepare": ModelResponsePayload;
+  "tool.call.prepare": ToolCallRequest;
+  "tools.call": ToolCallRequest;                 // Action 返回 ToolResult
+  "tool.result.prepare": ToolResultPreparePayload;
+  "context.commit": ContextCommitPayload;
+  "turn.complete": TurnCompletePayload;
+  "agent.error": AgentErrorPayload;
+  "agent.shutdown": AgentShutdownPayload;
+}
+```
+
 ## 5. AgentDraft 与工具所有权
 
 `agent.prepare` 和 `turn.prepare` 使用同一个 AgentDraft：
@@ -167,8 +567,7 @@ Observer 的返回值被忽略，但 `invoke()` 的成功分支仍必须返回�
     "temperature": null,
     "max_output_tokens": null
   },
-  "tools": [],
-  "context": null
+  "tools": []
 }
 ```
 
