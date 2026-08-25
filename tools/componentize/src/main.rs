@@ -8,11 +8,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = args
         .next()
         .map(PathBuf::from)
-        .ok_or("usage: cargo run --example componentize -- <core.wasm> <component.wasm>")?;
+        .ok_or("usage: cargo run --manifest-path tools/componentize/Cargo.toml -- <core.wasm> <component.wasm>")?;
     let output = args
         .next()
         .map(PathBuf::from)
-        .ok_or("usage: cargo run --example componentize -- <core.wasm> <component.wasm>")?;
+        .ok_or("usage: cargo run --manifest-path tools/componentize/Cargo.toml -- <core.wasm> <component.wasm>")?;
     if args.next().is_some() {
         return Err("componentize accepts exactly two paths".into());
     }

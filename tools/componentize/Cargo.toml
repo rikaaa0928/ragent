@@ -1,0 +1,8 @@
+[package]
+name = "ragent-componentize"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wit-component = "0.239.0"

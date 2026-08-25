@@ -812,13 +812,12 @@ export!(Extension);
 
 ```sh
 cargo build --target wasm32-unknown-unknown --release
-cargo run --manifest-path /path/to/ragent/Cargo.toml \
-  --example componentize -- \
+cargo run --manifest-path /path/to/ragent/tools/componentize/Cargo.toml -- \
   target/wasm32-unknown-unknown/release/example.wasm \
   example.component.wasm
 ```
 
-仓库脚本 [`scripts/build-extensions.sh`](scripts/build-extensions.sh) 就是这条流程。
+通用转换器位于 [`tools/componentize`](tools/componentize)，所有已经嵌入 WIT 元数据的 Rust Core Wasm 扩展都可以共用。仓库脚本 [`scripts/build-extensions.sh`](scripts/build-extensions.sh) 使用它构建 Shell 示例扩展。
 
 ## 9. 用 Go 开发
 

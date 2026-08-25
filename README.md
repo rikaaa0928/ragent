@@ -145,5 +145,6 @@ src/context.rs            context storage and commits
 src/wasm/                 WASM loading, dispatch, and protocol types
 wit/ragent-extension.wit  Component ABI
 extensions/               optional bundled extension examples
+tools/componentize/       generic Core Wasm to Component converter
 EXTENSIONS.md             extension development and Hook protocol
 ```

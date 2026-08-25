@@ -11,8 +11,7 @@ cargo build \
     --release
 
 cargo run \
-    --manifest-path "$project_dir/Cargo.toml" \
-    --example componentize \
+    --manifest-path "$project_dir/tools/componentize/Cargo.toml" \
     -- "$guest_wasm" "$component_wasm"
 
 echo "$component_wasm"

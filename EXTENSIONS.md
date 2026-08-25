@@ -812,13 +812,12 @@ Build core Wasm and convert it to a Component:
 
 ```sh
 cargo build --target wasm32-unknown-unknown --release
-cargo run --manifest-path /path/to/ragent/Cargo.toml \
-  --example componentize -- \
+cargo run --manifest-path /path/to/ragent/tools/componentize/Cargo.toml -- \
   target/wasm32-unknown-unknown/release/example.wasm \
   example.component.wasm
 ```
 
-[`scripts/build-extensions.sh`](scripts/build-extensions.sh) implements this exact process.
+The generic converter lives in [`tools/componentize`](tools/componentize). It is shared by all Rust extensions whose core Wasm already contains WIT metadata. [`scripts/build-extensions.sh`](scripts/build-extensions.sh) implements this exact process for the bundled Shell extension.
 
 ## 9. Developing in Go
 

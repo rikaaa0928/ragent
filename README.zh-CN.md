@@ -145,5 +145,6 @@ src/context.rs            上下文保存与提交
 src/wasm/                 WASM 加载、调度和协议类型
 wit/ragent-extension.wit  Component ABI
 extensions/               仓库提供的可选扩展示例
-EXTENSIONS.md             扩展开发与 Hook 协议
+tools/componentize/       通用 Core Wasm 到 Component 转换器
+EXTENSIONS.zh-CN.md       扩展开发与 Hook 协议
 ```

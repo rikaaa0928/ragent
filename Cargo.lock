@@ -1538,7 +1538,6 @@ dependencies = [
  "tokio",
  "toml",
  "wasmtime",
- "wit-component",
 ]
 
 [[package]]
@@ -2466,18 +2465,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasm-metadata"
-version = "0.239.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20b3ec880a9ac69ccd92fbdbcf46ee833071cf09f82bb005b2327c7ae6025ae2"
-dependencies = [
- "anyhow",
- "indexmap",
- "wasm-encoder 0.239.0",
- "wasmparser 0.239.0",
-]
-
-[[package]]
 name = "wasm-streams"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3196,25 +3183,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "wit-component"
-version = "0.239.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88a866b19dba2c94d706ec58c92a4c62ab63e482b4c935d2a085ac94caecb136"
-dependencies = [
- "anyhow",
- "bitflags",
- "indexmap",
- "log",
- "serde",
- "serde_derive",
- "serde_json",
- "wasm-encoder 0.239.0",
- "wasm-metadata",
- "wasmparser 0.239.0",
- "wit-parser",
 ]
 
 [[package]]
