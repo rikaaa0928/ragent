@@ -55,7 +55,7 @@ world plugin {
 | `metadata` | 加载时一次 | 返回扩展身份和 Hook 订阅的 JSON |
 | `initialize` | Agent 初始化时一次 | 接收配置文件中 `[extensions.config]` 对应的 JSON |
 | `invoke` | 每次 Hook | 接收 HookRequest JSON，返回 HookResult JSON或错误字符串 |
-| `shutdown` | Agent 关闭时一次 | 释放扩展内部状态 |
+| `shutdown` | Agent 关闭时一次 | 释放扩展内部状态，包括正常取消后的清理 |
 
 选择单一 JSON `invoke` 而不是为每个 Hook 增加 WIT 方法，是为了在新增 Hook 时保持 Component ABI 稳定。JSON 协议当前为 `protocol_version = 1`。
 
@@ -666,8 +666,15 @@ interface HookPayloadMap {
   -> 继续或结束
 
 运行错误 -> agent.error
+取消     -> 丢弃当前模型 / Hook / 工具 Future
 关闭     -> agent.shutdown -> lifecycle.shutdown
 ```
+
+宿主持有一个共享取消令牌。CLI 的 `Ctrl+C` 与 `AgentSender::cancel()` 都会取消
+正在运行的 Agent Future；取消属于正常结束，不触发 `agent.error`。宿主随后调用
+`agent.shutdown` 和生命周期 `shutdown`。被取消的 `invoke` Future 可能在任意 await
+点被丢弃，因此扩展不能假定单次调用内的清理代码一定执行完毕；持久资源清理应放在
+生命周期 `shutdown` 中。宿主命令会在被取消的 Future 丢弃时终止对应子进程。
 
 `BaseAgentState` 不会被每轮动态变更永久污染。若要永久添加工具或修改默认 Prompt，在 `agent.prepare` 修改；若要按上下文动态变化，在 `turn.prepare` 修改。
 

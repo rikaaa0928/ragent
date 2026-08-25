@@ -119,6 +119,9 @@ cargo run -- s del sess_example
 cargo run -- --help
 ```
 
+运行期间第一次按 `Ctrl+C` 会取消当前模型、Hook 或工具任务，随后执行扩展
+shutdown 并保存会话。清理过程中再次按下会立即以状态码 130 退出。
+
 ## 默认行为
 
 - 默认 System Prompt 只有：`你是一个高效、精准的 AI 智能体助手`
@@ -126,6 +129,7 @@ cargo run -- --help
 - 不进行自动上下文裁剪
 - `max_iterations = 0` 表示不限制循环轮数
 - Session ID 只允许字母、数字、`_`、`-`，最大 64 个字符
+- 嵌入式调用方可以通过 `AgentSender::cancel()` 走同一条取消流程
 
 ## 验证
 

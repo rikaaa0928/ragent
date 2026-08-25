@@ -1,18 +1,29 @@
 use crate::error::AgentError;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio_util::sync::CancellationToken;
 
 /// Agent 输入端发送句柄，支持及时和延时双通道消息发送
 #[derive(Clone, Debug)]
 pub struct AgentSender {
     pub(crate) immediate_tx: UnboundedSender<String>,
     pub(crate) delayed_tx: UnboundedSender<String>,
+    cancellation: CancellationToken,
 }
 
 impl AgentSender {
     pub fn new(immediate_tx: UnboundedSender<String>, delayed_tx: UnboundedSender<String>) -> Self {
+        Self::with_cancellation(immediate_tx, delayed_tx, CancellationToken::new())
+    }
+
+    pub(crate) fn with_cancellation(
+        immediate_tx: UnboundedSender<String>,
+        delayed_tx: UnboundedSender<String>,
+        cancellation: CancellationToken,
+    ) -> Self {
         Self {
             immediate_tx,
             delayed_tx,
+            cancellation,
         }
     }
 
@@ -33,5 +44,20 @@ impl AgentSender {
     /// 检查两个输入通道是否均已关闭
     pub fn is_closed(&self) -> bool {
         self.immediate_tx.is_closed() && self.delayed_tx.is_closed()
+    }
+
+    /// 请求 Agent 尽快停止当前推理、Hook 或工具调用。
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    /// Agent 是否已收到取消请求。
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    /// 返回与 Agent 共享的取消令牌，供外部异步任务组合等待。
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation.clone()
     }
 }

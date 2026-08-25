@@ -14,6 +14,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio_util::sync::CancellationToken;
 
 const DEFAULT_SYSTEM_PROMPT: &str = "你是一个高效、精准的 AI 智能体助手";
 
@@ -28,6 +29,7 @@ pub struct Agent {
     pending_inputs: Vec<String>,
     immediate_rx: UnboundedReceiver<String>,
     delayed_rx: UnboundedReceiver<String>,
+    cancellation: CancellationToken,
 }
 
 impl Agent {
@@ -37,6 +39,7 @@ impl Agent {
     ) -> Result<(Self, AgentSender), AgentError> {
         let (immediate_tx, immediate_rx) = unbounded_channel();
         let (delayed_tx, delayed_rx) = unbounded_channel();
+        let cancellation = CancellationToken::new();
         manager.validate_subscriptions()?;
         manager.initialize().await?;
 
@@ -78,8 +81,12 @@ impl Agent {
             pending_inputs: vec![],
             immediate_rx,
             delayed_rx,
+            cancellation: cancellation.clone(),
         };
-        Ok((agent, AgentSender::new(immediate_tx, delayed_tx)))
+        Ok((
+            agent,
+            AgentSender::with_cancellation(immediate_tx, delayed_tx, cancellation),
+        ))
     }
 
     pub async fn new(config: AgentConfig) -> Result<(Self, AgentSender), AgentError> {
@@ -210,7 +217,15 @@ impl Agent {
     }
 
     pub async fn run(&mut self) -> Result<String, AgentError> {
-        let result = self.run_inner().await;
+        let cancellation = self.cancellation.clone();
+        let result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Ok(String::new()),
+            result = self.run_inner() => result,
+        };
+        if result.is_ok() {
+            self.event_handler.on_event(&AgentEvent::AgentFinished);
+        }
         if let Err(error) = &result {
             let _ = self
                 .extension_manager
@@ -236,7 +251,6 @@ impl Agent {
         loop {
             while let Ok(input) = self.immediate_rx.try_recv() {
                 if self.accept_input(input, false).await? == FlowControl::Stop {
-                    self.event_handler.on_event(&AgentEvent::AgentFinished);
                     return Ok(last_response_text);
                 }
             }
@@ -466,7 +480,6 @@ impl Agent {
                 break;
             }
         }
-        self.event_handler.on_event(&AgentEvent::AgentFinished);
         Ok(last_response_text)
     }
 

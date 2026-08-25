@@ -54,6 +54,35 @@ mod tests {
         assert!(agent.context().items().is_empty());
     }
 
+    #[tokio::test]
+    async fn sender_cancels_agent_before_model_io() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let config = AgentConfig::new("https://example.invalid", "fake_key", "test-model");
+        let (mut agent, sender) = AgentBuilder::new(config)
+            .with_extension_manager(ExtensionManager::empty())
+            .build()
+            .await
+            .unwrap();
+        let finished = Arc::new(AtomicUsize::new(0));
+        let finished_for_handler = Arc::clone(&finished);
+        agent.set_event_handler(Arc::new(FnEventHandler(move |event| {
+            if matches!(event, AgentEvent::AgentFinished) {
+                finished_for_handler.fetch_add(1, Ordering::SeqCst);
+            }
+        })));
+        agent.add_user_message("this must not reach the model");
+
+        sender.cancel();
+
+        assert!(sender.is_cancelled());
+        assert!(sender.cancellation_token().is_cancelled());
+        assert_eq!(agent.run().await.unwrap(), "");
+        assert_eq!(finished.load(Ordering::SeqCst), 1);
+        assert!(agent.context().items().is_empty());
+    }
+
     #[test]
     fn context_keeps_complete_history() {
         let mut context =

@@ -125,7 +125,7 @@ impl CliHandler {
 
         let event_handler = Arc::new(ConsoleEventHandler::new());
 
-        let (mut agent, _sender) =
+        let (mut agent, sender) =
             AgentBuilder::from_session(session_data.clone(), self.config.clone()).await?;
 
         agent.set_event_handler(event_handler);
@@ -135,6 +135,23 @@ impl CliHandler {
             agent.add_user_message(initial_prompt);
         }
 
+        // 首次 Ctrl+C 通过共享令牌取消 Agent；清理期间再次 Ctrl+C 则立即退出。
+        let signal_sender = sender.clone();
+        let ctrl_c_task = tokio::spawn(async move {
+            loop {
+                if let Err(error) = tokio::signal::ctrl_c().await {
+                    eprintln!("[无法监听 Ctrl+C] {error}");
+                    return;
+                }
+                if signal_sender.is_cancelled() {
+                    eprintln!("\n[再次收到 Ctrl+C，立即退出]");
+                    std::process::exit(130);
+                }
+                eprintln!("\n[收到 Ctrl+C，正在取消任务并安全退出...]");
+                signal_sender.cancel();
+            }
+        });
+
         // 运行 Agent
         let run_result = agent.run().await;
         let shutdown_result = agent.shutdown().await;
@@ -142,8 +159,12 @@ impl CliHandler {
         // 保存会话状态（无论 run 是否产生错误都尽可能保存历史上下文）
         session_data.system_prompt = agent.context().system_prompt().map(str::to_owned);
         session_data.update_from_context(agent.context().to_items());
-        self.store.save(&session_data)?;
+        let save_result = self.store.save(&session_data);
 
+        ctrl_c_task.abort();
+        let _ = ctrl_c_task.await;
+
+        save_result?;
         run_result?;
         shutdown_result
     }

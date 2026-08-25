@@ -55,7 +55,7 @@ Lifecycle methods:
 | `metadata` | Once while loading | Returns extension identity and Hook subscriptions as JSON |
 | `initialize` | Once during Agent initialization | Receives the matching `[extensions.config]` value as JSON |
 | `invoke` | Once per Hook invocation | Receives HookRequest JSON and returns HookResult JSON or an error string |
-| `shutdown` | Once while shutting down | Releases extension state |
+| `shutdown` | Once while shutting down | Releases extension state, including after graceful cancellation |
 
 One JSON-based `invoke` method keeps the Component ABI stable when new Hooks are added. The current JSON protocol is `protocol_version = 1`.
 
@@ -666,8 +666,17 @@ each turn
   -> continue or finish
 
 run error -> agent.error
+cancel    -> drop current model / Hook / tool future
 shutdown  -> agent.shutdown -> lifecycle.shutdown
 ```
+
+The host owns a shared cancellation token. CLI `Ctrl+C` and
+`AgentSender::cancel()` cancel the active Agent future; cancellation is a normal
+completion and does not invoke `agent.error`. The host then invokes
+`agent.shutdown` and lifecycle `shutdown`. A canceled `invoke` future may be
+dropped at any await point, so extensions must not rely on per-invocation cleanup
+running to completion. Put durable cleanup in lifecycle `shutdown`. Host commands
+are configured to kill their child process when the canceled future is dropped.
 
 Per-turn changes never mutate `BaseAgentState`. Use `agent.prepare` for persistent default tools or Prompt changes. Use `turn.prepare` for context-dependent changes.
 

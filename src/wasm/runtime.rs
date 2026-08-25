@@ -16,12 +16,9 @@ struct HostState;
 
 impl ragent::extension::host::Host for HostState {
     async fn execute_command(&mut self, command: String) -> ragent::extension::host::CommandOutput {
-        match tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .output()
-            .await
-        {
+        let mut child = tokio::process::Command::new("sh");
+        child.arg("-c").arg(command).kill_on_drop(true);
+        match child.output().await {
             Ok(output) => ragent::extension::host::CommandOutput {
                 exit_code: output.status.code().unwrap_or(-1),
                 stdout: String::from_utf8_lossy(&output.stdout).into_owned(),

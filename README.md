@@ -119,6 +119,10 @@ Show all commands:
 cargo run -- --help
 ```
 
+Press `Ctrl+C` once during a run to cancel the current model, Hook, or tool work,
+run extension shutdown, and save the session. Press it again while cleanup is in
+progress to exit immediately with status 130.
+
 ## Default behavior
 
 - The default System Prompt is exactly: `你是一个高效、精准的 AI 智能体助手`
@@ -126,6 +130,7 @@ cargo run -- --help
 - Context is never pruned automatically.
 - `max_iterations = 0` means that the loop is unlimited.
 - Session IDs may contain only letters, digits, `_`, and `-`, with a maximum length of 64 characters.
+- `AgentSender::cancel()` exposes the same cancellation path for embedded callers.
 
 ## Verification
 
