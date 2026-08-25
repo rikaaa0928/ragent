@@ -61,6 +61,16 @@ cargo build --release
 extensions/shell/target/component/ragent_shell_extension.wasm
 ```
 
+构建并安装或更新到当前 ragent 配置目录：
+
+```sh
+./scripts/install-extensions.sh
+```
+
+安装/更新脚本优先使用 `XDG_CONFIG_HOME`，未设置时使用 `~/.config/ragent`。它会原子
+替换 `extensions/shell.wasm`；若 `config.toml` 不存在，则创建下文所示的 Shell
+配置，安装或更新时绝不会修改已有配置文件。
+
 ## 配置
 
 模型连接通过环境变量提供：
@@ -71,15 +81,7 @@ export ROSETTA_TOKEN="your-token"
 export MODEL_NAME="your-model"
 ```
 
-扩展通过 `~/.config/ragent/config.toml` 加载。安装 Shell 示例扩展：
-
-```sh
-mkdir -p ~/.config/ragent/extensions
-cp extensions/shell/target/component/ragent_shell_extension.wasm \
-  ~/.config/ragent/extensions/shell.wasm
-```
-
-然后创建配置：
+扩展通过 `~/.config/ragent/config.toml` 加载。首次安装时，安装脚本会创建以下配置：
 
 ```toml
 [[extensions]]

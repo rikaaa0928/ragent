@@ -61,6 +61,17 @@ The generated Component is written to:
 extensions/shell/target/component/ragent_shell_extension.wasm
 ```
 
+Build and install or update it in the active ragent configuration directory:
+
+```sh
+./scripts/install-extensions.sh
+```
+
+The install/update script follows `XDG_CONFIG_HOME` when set, otherwise it uses
+`~/.config/ragent`. It atomically replaces `extensions/shell.wasm`. If
+`config.toml` does not exist, it creates the Shell configuration shown below;
+an existing configuration is never modified during installation or updates.
+
 ## Configuration
 
 Configure the model connection with environment variables:
@@ -71,15 +82,8 @@ export ROSETTA_TOKEN="your-token"
 export MODEL_NAME="your-model"
 ```
 
-Extensions are loaded from `~/.config/ragent/config.toml`. Install the example Shell extension:
-
-```sh
-mkdir -p ~/.config/ragent/extensions
-cp extensions/shell/target/component/ragent_shell_extension.wasm \
-  ~/.config/ragent/extensions/shell.wasm
-```
-
-Then create the configuration:
+Extensions are loaded from `~/.config/ragent/config.toml`. The installation
+script creates the following configuration for a first-time installation:
 
 ```toml
 [[extensions]]

@@ -841,6 +841,10 @@ cargo run --manifest-path /path/to/ragent/tools/componentize/Cargo.toml -- \
 
 通用转换器位于 [`tools/componentize`](tools/componentize)，所有已经嵌入 WIT 元数据的 Rust Core Wasm 扩展都可以共用。仓库脚本 [`scripts/build-extensions.sh`](scripts/build-extensions.sh) 使用它构建 Shell 示例扩展。
 
+仓库提供的 [`scripts/install-extensions.sh`](scripts/install-extensions.sh) 会先执行上述
+构建，再把 `shell.wasm` 原子安装或更新到当前 ragent 配置目录。仅当 `config.toml`
+不存在时才会创建默认配置，更新时绝不会改写已有配置。
+
 ## 9. 用 Go 开发
 
 推荐使用 Bytecode Alliance 的 [`componentize-go`](https://github.com/bytecodealliance/componentize-go) 或 `wit-bindgen go`。当前工具要求和生成 API仍在变化，应先执行本机版本的 `--help`，并以生成代码中的函数签名为准。

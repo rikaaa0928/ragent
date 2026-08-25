@@ -846,6 +846,11 @@ cargo run --manifest-path /path/to/ragent/tools/componentize/Cargo.toml -- \
 
 The generic converter lives in [`tools/componentize`](tools/componentize). It is shared by all Rust extensions whose core Wasm already contains WIT metadata. [`scripts/build-extensions.sh`](scripts/build-extensions.sh) implements this exact process for the bundled Shell extension.
 
+For the bundled extension, [`scripts/install-extensions.sh`](scripts/install-extensions.sh)
+runs that build and atomically installs or updates `shell.wasm` under the active
+ragent configuration directory. It creates a default `config.toml` only when
+none exists; updates never rewrite an existing configuration.
+
 ## 9. Developing in Go
 
 Use Bytecode Alliance [`componentize-go`](https://github.com/bytecodealliance/componentize-go) or `wit-bindgen go`. These tools and generated APIs are evolving, so check the locally installed version's `--help` and follow its generated signatures.
