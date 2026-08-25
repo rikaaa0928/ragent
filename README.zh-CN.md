@@ -86,9 +86,14 @@ cp extensions/shell/target/component/ragent_shell_extension.wasm \
 name = "shell"
 path = "extensions/shell.wasm"
 enabled = true
+
+[extensions.config]
+default_timeout_seconds = 1800
 ```
 
 配置文件当前只负责发现扩展和传递扩展初始化配置。相对路径以 `~/.config/ragent/` 为基准。
+Shell 未配置时默认超时 1800 秒（30 分钟）；配置为 `0` 可禁用超时。每次
+Shell 工具调用还可以通过可选参数 `timeout_seconds` 覆盖，单次传 `0` 同样表示禁用。
 
 ## 使用
 
@@ -139,7 +144,8 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-Shell 扩展测试同时验证成功命令和非零退出码；非零退出码会作为失败结果返回给 Agent。
+Shell 扩展测试覆盖成功命令、非零退出码、配置默认超时、单次覆盖和禁用超时；
+非零退出码与超时都会作为失败结果返回给 Agent。
 
 ## 项目结构
 

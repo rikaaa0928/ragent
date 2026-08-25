@@ -15,7 +15,7 @@ Agent 本体只负责模型 I/O、上下文提交和循环控制。扩展可以�
 - 待提交的上下文
 - 是否继续下一轮
 
-WASM 在这里是跨语言扩展载体，不是安全沙箱。扩展能否执行某项宿主能力由 WIT import 决定；当前宿主只提供 `host.execute-command`，它会直接在宿主机上通过 `sh -c` 执行命令。不要加载不受信任的 Shell 扩展。
+WASM 在这里是跨语言扩展载体，不是安全沙箱。扩展能否执行某项宿主能力由 WIT import 决定；当前宿主提供 `host.execute-command` 和 `host.execute-command-with-timeout`，它们会直接在宿主机上通过 `sh -c` 执行命令。不要加载不受信任的 Shell 扩展。
 
 ## 2. Component ABI
 
@@ -33,6 +33,7 @@ interface host {
     }
 
     execute-command: func(command: string) -> command-output;
+    execute-command-with-timeout: func(command: string, timeout-ms: u64) -> command-output;
 }
 
 interface lifecycle {
@@ -230,6 +231,15 @@ interface HostCommandOutput {
   error: string | null;
 }
 
+interface ShellExtensionConfig {
+  default_timeout_seconds?: number; // 非负 u64；省略为 1800；0 表示禁用
+}
+
+interface ShellToolArguments {
+  command: string;
+  timeout_seconds?: number;         // 非负 u64；省略使用配置默认值；0 表示禁用
+}
+
 interface ToolDefinition {
   name: string;
   description: string;
@@ -310,7 +320,7 @@ interface AgentErrorPayload {
 }
 ```
 
-`HostCommandOutput` 不是 JSON Hook payload，而是 `host.execute-command` 的 WIT record。上面的 `exit_code` 是伪代码名称；实际生成的语言绑定可能使用 `exitCode`、`exit_code` 等本语言命名方式，对应的 WIT 字段是 `exit-code`。`ExtensionConfigItem` 和 `ExtensionsConfig` 描述 TOML 配置反序列化后的逻辑结构，其中只有单个条目的 `config` 会被序列化成 JSON 传给该扩展。
+`HostCommandOutput` 不是 JSON Hook payload，而是两个宿主命令函数返回的 WIT record。上面的 `exit_code` 是伪代码名称；实际生成的语言绑定可能使用 `exitCode`、`exit_code` 等本语言命名方式，对应的 WIT 字段是 `exit-code`。为保持兼容而保留的 `execute-command` 延续原有的不超时行为；`execute-command-with-timeout` 中 `timeout-ms = 0` 表示不启用超时。`ExtensionConfigItem` 和 `ExtensionsConfig` 描述 TOML 配置反序列化后的逻辑结构，其中只有单个条目的 `config` 会被序列化成 JSON 传给该扩展。
 
 ### 4.6 Open Responses 请求结构
 
@@ -719,7 +729,7 @@ interface HookPayloadMap {
   "call_id": "call_123",
   "tool_id": "tool-1",
   "name": "shell",
-  "arguments": {"command":"pwd"}
+  "arguments": {"command":"pwd","timeout_seconds":30}
 }
 ```
 
@@ -739,6 +749,12 @@ Action 必须返回：
 ```
 
 工具失败也应返回正常的 HookResult，并令 `success = false`；只有扩展协议本身失败时才返回 WIT `err(string)`。
+
+仓库内置的 Shell 示例中，`timeout_seconds` 是可选参数。扩展依次取单次参数、
+初始化配置中的 `default_timeout_seconds`、最后取 1800 秒；值为 `0` 表示禁用超时。
+工具 JSON Schema 中显示的 `default` 只用于提示，实际执行时扩展仍会重复完成兜底。
+正数会转换为毫秒并传给 `host.execute-command-with-timeout`。命令超时会返回正常的
+失败 `ToolResult`；即使禁用了命令超时，`Ctrl+C` 全局取消仍然有效。
 
 ### 7.3 context.commit
 
@@ -941,14 +957,16 @@ enabled = true
 
 ```toml
 [[extensions]]
-name = "example"
-path = "extensions/example.wasm"
+name = "shell"
+path = "extensions/shell.wasm"
 enabled = true
 
 [extensions.config]
-endpoint = "https://example.com"
-mode = "strict"
+default_timeout_seconds = 1800
 ```
+
+Shell 扩展接受 `default_timeout_seconds`：省略时为 1800 秒（30 分钟），设为
+`0` 时禁用命令超时。工具调用可用 `timeout_seconds` 覆盖配置值。
 
 加载规则：
 

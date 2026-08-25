@@ -15,7 +15,7 @@ The Agent core only owns model I/O, context commits, and loop control. Extension
 - pending context commits;
 - the decision to continue the loop.
 
-WASM is a cross-language extension format here, not a security sandbox. Host capabilities are determined by WIT imports. The current host provides only `host.execute-command`, which executes commands directly on the host through `sh -c`. Do not load an untrusted Shell extension.
+WASM is a cross-language extension format here, not a security sandbox. Host capabilities are determined by WIT imports. The current host provides `host.execute-command` and `host.execute-command-with-timeout`, which execute commands directly on the host through `sh -c`. Do not load an untrusted Shell extension.
 
 ## 2. Component ABI
 
@@ -33,6 +33,7 @@ interface host {
     }
 
     execute-command: func(command: string) -> command-output;
+    execute-command-with-timeout: func(command: string, timeout-ms: u64) -> command-output;
 }
 
 interface lifecycle {
@@ -230,6 +231,15 @@ interface HostCommandOutput {
   error: string | null;
 }
 
+interface ShellExtensionConfig {
+  default_timeout_seconds?: number; // non-negative u64; omitted = 1800; 0 disables
+}
+
+interface ShellToolArguments {
+  command: string;
+  timeout_seconds?: number;         // non-negative u64; omitted = configured default; 0 disables
+}
+
 interface ToolDefinition {
   name: string;
   description: string;
@@ -310,7 +320,7 @@ interface AgentErrorPayload {
 }
 ```
 
-`HostCommandOutput` is not a JSON Hook payload; it is the WIT record returned by `host.execute-command`. `exit_code` above is pseudocode. Generated bindings may call it `exitCode`, `exit_code`, or another language-native spelling; the WIT field is `exit-code`. `ExtensionConfigItem` and `ExtensionsConfig` describe the logical structure deserialized from TOML. Only an individual entry's `config` value is serialized to JSON and passed to that extension.
+`HostCommandOutput` is not a JSON Hook payload; it is the WIT record returned by either host command function. `exit_code` above is pseudocode. Generated bindings may call it `exitCode`, `exit_code`, or another language-native spelling; the WIT field is `exit-code`. `execute-command` is retained with its original no-timeout behavior for compatibility. `execute-command-with-timeout` uses `timeout-ms = 0` to mean no timeout. `ExtensionConfigItem` and `ExtensionsConfig` describe the logical structure deserialized from TOML. Only an individual entry's `config` value is serialized to JSON and passed to that extension.
 
 ### 4.6 Open Responses request structures
 
@@ -721,7 +731,7 @@ This is a high-frequency Hook. Avoid expensive synchronous work.
   "call_id": "call_123",
   "tool_id": "tool-1",
   "name": "shell",
-  "arguments": {"command":"pwd"}
+  "arguments": {"command":"pwd","timeout_seconds":30}
 }
 ```
 
@@ -741,6 +751,15 @@ The Action returns:
 ```
 
 A normal tool failure is still a successful WIT invocation with `success = false`. Return WIT `err(string)` only when the extension protocol itself fails.
+
+For the bundled Shell extension, `timeout_seconds` is optional. The extension
+resolves the per-call value first, then `default_timeout_seconds` from its
+initialization config, then 1,800 seconds. A value of `0` disables the timeout.
+The displayed JSON Schema `default` is informational; the extension repeats this
+fallback at execution time. Positive values are converted to milliseconds and
+passed to `host.execute-command-with-timeout`. Timeout returns a normal failed
+`ToolResult`, while `Ctrl+C` cancellation remains effective even when timeout is
+disabled.
 
 ### 7.3 context.commit
 
@@ -945,14 +964,17 @@ Default layout:
 
 ```toml
 [[extensions]]
-name = "example"
-path = "extensions/example.wasm"
+name = "shell"
+path = "extensions/shell.wasm"
 enabled = true
 
 [extensions.config]
-endpoint = "https://example.com"
-mode = "strict"
+default_timeout_seconds = 1800
 ```
+
+The Shell extension accepts `default_timeout_seconds`. Omit it for 1,800 seconds
+(30 minutes), or set it to `0` to disable command timeout. Tool calls can override
+the configured value with `timeout_seconds`.
 
 Loading rules:
 

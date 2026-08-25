@@ -100,7 +100,9 @@ mod tests {
             .await
             .unwrap();
         let mut manager = ExtensionManager::empty();
-        manager.add_plugin(plugin).unwrap();
+        manager
+            .add_plugin_with_config(plugin, serde_json::json!({"default_timeout_seconds": 1}))
+            .unwrap();
         manager.initialize().await.unwrap();
 
         let (draft, _) = manager
@@ -123,6 +125,10 @@ mod tests {
         assert_eq!(draft.tools.len(), 1);
         assert_eq!(draft.tools[0].definition.name, "shell");
         let tool = &draft.tools[0];
+        assert_eq!(
+            tool.definition.parameters["properties"]["timeout_seconds"]["default"],
+            1
+        );
 
         let success = manager
             .action(
@@ -162,6 +168,100 @@ mod tests {
         assert!(!failure.success);
         assert!(failure.error.is_some());
         assert!(failure.output.contains("exit_code: 7"));
+
+        let timed_out = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                tool.owner.as_deref().unwrap(),
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-3".into(),
+                    tool_id: tool.id.clone().unwrap(),
+                    name: "shell".into(),
+                    arguments: serde_json::json!({"command": "sleep 2"}),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let timed_out: ToolResult = serde_json::from_value(timed_out).unwrap();
+        assert!(!timed_out.success);
+        assert!(timed_out.output.contains("timed out after 1000 ms"));
+
+        let overridden = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                tool.owner.as_deref().unwrap(),
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-4".into(),
+                    tool_id: tool.id.clone().unwrap(),
+                    name: "shell".into(),
+                    arguments: serde_json::json!({
+                        "command": "sleep 1; printf override",
+                        "timeout_seconds": 2
+                    }),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let overridden: ToolResult = serde_json::from_value(overridden).unwrap();
+        assert!(overridden.success);
+        assert!(overridden.output.contains("override"));
+    }
+
+    #[tokio::test]
+    async fn shell_component_accepts_zero_to_disable_timeout() {
+        let plugin = WasmPlugin::load_from_file("shell", &shell_component_path())
+            .await
+            .unwrap();
+        let mut manager = ExtensionManager::empty();
+        manager
+            .add_plugin_with_config(plugin, serde_json::json!({"default_timeout_seconds": 0}))
+            .unwrap();
+
+        manager.initialize().await.unwrap();
+        let (draft, _) = manager
+            .transform_agent_draft(
+                HOOK_AGENT_PREPARE,
+                None,
+                AgentDraft {
+                    system_prompt: "test".into(),
+                    model: ModelDraft {
+                        name: "test".into(),
+                        temperature: None,
+                        max_output_tokens: None,
+                    },
+                    tools: vec![],
+                    context: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            draft.tools[0].definition.parameters["properties"]["timeout_seconds"]["default"],
+            0
+        );
+        let tool = &draft.tools[0];
+        let result = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                tool.owner.as_deref().unwrap(),
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-no-timeout".into(),
+                    tool_id: tool.id.clone().unwrap(),
+                    name: "shell".into(),
+                    arguments: serde_json::json!({"command": "sleep 1; printf no-timeout"}),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let result: ToolResult = serde_json::from_value(result).unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("no-timeout"));
     }
 
     #[tokio::test]
@@ -193,6 +293,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(draft.tools[0].definition.name, "shell");
+        assert_eq!(
+            draft.tools[0].definition.parameters["properties"]["timeout_seconds"]["default"],
+            1800
+        );
     }
 
     #[test]

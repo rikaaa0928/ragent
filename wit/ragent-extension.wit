@@ -9,6 +9,7 @@ interface host {
     }
 
     execute-command: func(command: string) -> command-output;
+    execute-command-with-timeout: func(command: string, timeout-ms: u64) -> command-output;
 }
 
 interface lifecycle {

@@ -1,6 +1,7 @@
 use crate::error::AgentError;
 use crate::wasm::types::{ExtensionMetadata, HookRequest};
 use std::path::Path;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store};
@@ -16,22 +17,49 @@ struct HostState;
 
 impl ragent::extension::host::Host for HostState {
     async fn execute_command(&mut self, command: String) -> ragent::extension::host::CommandOutput {
-        let mut child = tokio::process::Command::new("sh");
-        child.arg("-c").arg(command).kill_on_drop(true);
-        match child.output().await {
-            Ok(output) => ragent::extension::host::CommandOutput {
-                exit_code: output.status.code().unwrap_or(-1),
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                error: None,
-            },
-            Err(error) => ragent::extension::host::CommandOutput {
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                error: Some(error.to_string()),
-            },
+        execute_command(command, 0).await
+    }
+
+    async fn execute_command_with_timeout(
+        &mut self,
+        command: String,
+        timeout_ms: u64,
+    ) -> ragent::extension::host::CommandOutput {
+        execute_command(command, timeout_ms).await
+    }
+}
+
+async fn execute_command(
+    command: String,
+    timeout_ms: u64,
+) -> ragent::extension::host::CommandOutput {
+    let mut child = tokio::process::Command::new("sh");
+    child.arg("-c").arg(command).kill_on_drop(true);
+    let output = if timeout_ms == 0 {
+        child.output().await
+    } else {
+        match tokio::time::timeout(Duration::from_millis(timeout_ms), child.output()).await {
+            Ok(result) => result,
+            Err(_) => return command_error(format!("command timed out after {timeout_ms} ms")),
         }
+    };
+    match output {
+        Ok(output) => ragent::extension::host::CommandOutput {
+            exit_code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            error: None,
+        },
+        Err(error) => command_error(error),
+    }
+}
+
+fn command_error(error: impl ToString) -> ragent::extension::host::CommandOutput {
+    ragent::extension::host::CommandOutput {
+        exit_code: -1,
+        stdout: String::new(),
+        stderr: String::new(),
+        error: Some(error.to_string()),
     }
 }
 

@@ -86,9 +86,15 @@ Then create the configuration:
 name = "shell"
 path = "extensions/shell.wasm"
 enabled = true
+
+[extensions.config]
+default_timeout_seconds = 1800
 ```
 
 The configuration file currently only discovers extensions and supplies their initialization configuration. Relative paths are resolved from `~/.config/ragent/`.
+The Shell timeout defaults to 1,800 seconds (30 minutes) when omitted. Set it to
+`0` to disable the timeout. Each Shell tool call may override it with the optional
+`timeout_seconds` argument; `0` also disables the timeout for that call.
 
 ## Usage
 
@@ -140,7 +146,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-The Shell extension tests cover both successful commands and non-zero exit codes. A non-zero exit code is returned to the Agent as a failed tool result.
+The Shell extension tests cover successful commands, non-zero exit codes,
+configured timeouts, per-call overrides, and timeout disabling. A non-zero exit
+code or timeout is returned to the Agent as a failed tool result.
 
 ## Repository layout
 
