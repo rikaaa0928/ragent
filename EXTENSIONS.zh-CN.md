@@ -2,7 +2,7 @@
 
 # ragent 扩展开发与 Hook 协议
 
-本文档描述当前代码已经实现的 WASM Component 扩展协议。协议入口见 [`wit/ragent-extension.wit`](wit/ragent-extension.wit)，Rust 数据结构见 [`src/wasm/types.rs`](src/wasm/types.rs)，可运行的完整示例见 [`extensions/shell`](extensions/shell)。
+本文档描述当前代码已经实现的 WASM Component 扩展协议。协议入口见 [`wit/ragent-extension.wit`](wit/ragent-extension.wit)，Rust 数据结构见 [`src/wasm/types.rs`](src/wasm/types.rs)，可运行的完整示例见 [`extensions/shell`](extensions/shell) 和 [`extensions/file_editor`](extensions/file_editor)。
 
 ## 1. 设计目标
 
@@ -15,7 +15,7 @@ Agent 本体只负责模型 I/O、上下文提交和循环控制。扩展可以�
 - 待提交的上下文
 - 是否继续下一轮
 
-WASM 在这里是跨语言扩展载体，不是安全沙箱。扩展能否执行某项宿主能力由 WIT import 决定；当前宿主只提供 `host.execute-command-with-timeout`，它会直接在宿主机上通过 `sh -c` 执行命令。不要加载不受信任的 Shell 扩展。
+WASM 在这里是跨语言扩展载体，不是安全沙箱。扩展能否执行某项宿主能力由 WIT import 决定；项目 host 接口可以通过 `sh -c` 执行命令，运行时还会链接已支持的 WASI 0.2 接口。不要加载不受信任的扩展。
 
 ## 2. Component ABI
 
@@ -775,7 +775,7 @@ Action 必须返回：
 
 ## 8. 用 Rust 开发
 
-Rust 是当前仓库完整验证的开发路径。最简单的方式是复制 [`extensions/shell`](extensions/shell)。
+Rust 是当前仓库完整验证的开发路径。最简单的方式是复制 [`extensions/shell`](extensions/shell) 或 [`extensions/file_editor`](extensions/file_editor)。
 
 `Cargo.toml`：
 
@@ -830,20 +830,16 @@ impl exports::ragent::extension::lifecycle::Guest for Extension {
 export!(Extension);
 ```
 
-构建 core Wasm 并转换为 Component：
+使用 Rust 的 WASIp2 target 直接构建 Component：
 
 ```sh
-cargo build --target wasm32-unknown-unknown --release
-cargo run --manifest-path /path/to/ragent/tools/componentize/Cargo.toml -- \
-  target/wasm32-unknown-unknown/release/example.wasm \
-  example.component.wasm
+cargo build --target wasm32-wasip2 --release
 ```
 
-通用转换器位于 [`tools/componentize`](tools/componentize)，所有已经嵌入 WIT 元数据的 Rust Core Wasm 扩展都可以共用。仓库脚本 [`scripts/build-extensions.sh`](scripts/build-extensions.sh) 使用它构建 Shell 示例扩展。
+生成的 `target/wasm32-wasip2/release/example.wasm` 已经是 Component。仓库脚本 [`scripts/build-extensions.sh`](scripts/build-extensions.sh) 使用这条路径构建两个示例扩展。
 
 仓库提供的 [`scripts/install-extensions.sh`](scripts/install-extensions.sh) 会先执行上述
-构建，再把 `shell.wasm` 原子安装或更新到当前 ragent 配置目录。仅当 `config.toml`
-不存在时才会创建默认配置，更新时绝不会改写已有配置。
+构建，再原子安装或更新选中的 `.wasm` 文件。如果 `config.toml` 缺少选中扩展的条目，脚本会通过同目录临时文件原子追加，不修改已存在的扩展条目。
 
 ## 9. 用 Go 开发
 
@@ -872,7 +868,7 @@ wasm-tools component new core-with-wit.wasm -o extension.wasm \
   --adapt wasi_snapshot_preview1.reactor.wasm
 ```
 
-注意：ragent 当前只链接 `ragent:extension/host`，没有链接通用 WASI 接口。Go 产物如果还导入 `wasi:*`，会在加载时失败。交付前必须用下文的 `wasm-tools component wit` 检查；在宿主加入 WASI 支持前，Go 路线属于需要自行处理 WASI 依赖的实验性路线。
+ragent 会链接项目的 `ragent:extension/host` 接口和 `wasmtime-wasi` 提供的 WASI 0.2 接口。交付前应用下文的 `wasm-tools component wit` 检查最终 imports；不在这两类集合内的 import（包括 `wasi:http`）仍会在加载时失败。
 
 ## 10. 用 AssemblyScript 开发
 
@@ -894,7 +890,7 @@ wasm-tools component new core-with-wit.wasm -o extension.wasm
 
 上面的命令不会替你生成 Canonical ABI；如果第 2 步没有正确完成，Component 会在转换或实例化时失败。因此当前更实际的 TypeScript 路线是编译为 ESM JavaScript，再使用 Bytecode Alliance 的 [`ComponentizeJS`](https://github.com/bytecodealliance/ComponentizeJS)。这不是 AssemblyScript 二进制路线，但可以直接从 TypeScript/JavaScript 逻辑生成 Component。
 
-由于 ragent 不提供 WASI imports，ComponentizeJS 应通过其 Node API关闭 `stdio`、`random`、`clocks`、`http`、`fetch-event`，生成只依赖目标 WIT world 的 pure component。
+ragent 提供 `wasmtime-wasi` 中的核心 WASI 0.2 接口，但不提供 `wasi:http`。ComponentizeJS 应将产物 imports 限制为项目 world 和宿主已支持的 WASI 0.2 接口；除非宿主新增对应支持，应关闭 `http` 和 `fetch-event`。
 
 ## 11. 用 Python 开发
 
@@ -922,7 +918,7 @@ componentize-py -d /path/to/ragent/wit -w plugin \
   componentize --stub-wasi app -o extension.wasm
 ```
 
-必须使用 `--stub-wasi` 或以其他方式确保最终 Component 不依赖宿主未提供的 WASI imports。Python 会把解释器和应用一起打进 Component，因此产物通常明显大于 Rust 扩展，加载时间也更长。
+如果生成的 Component 依赖宿主支持集合之外的 WASI imports，应使用 `--stub-wasi`；加载前始终检查最终 imports。Python 会把解释器和应用一起打进 Component，因此产物通常明显大于 Rust 扩展，加载时间也更长。
 
 ## 12. 检查 Component
 
@@ -933,7 +929,7 @@ wasm-tools validate extension.wasm --features component-model
 wasm-tools component wit extension.wasm
 ```
 
-提取出的 world 必须兼容 `ragent:extension/plugin@1.0.0`。当前宿主只允许项目 WIT 中的 `ragent:extension/host` import；如果输出还列出 `wasi:*` 或其他 import，ragent 目前无法实例化它。
+提取出的 world 必须兼容 `ragent:extension/plugin@1.0.0`。宿主会链接 `ragent:extension/host` 和 `wasmtime-wasi` 提供的 WASI 0.2 接口；任何其他 import（包括 `wasi:http`）目前都无法实例化。
 
 然后用临时配置做加载测试：
 
@@ -966,6 +962,11 @@ enabled = true
 
 [extensions.config]
 default_timeout_seconds = 1800
+
+[[extensions]]
+name = "file_editor"
+path = "extensions/file_editor.wasm"
+enabled = true
 ```
 
 Shell 扩展接受 `default_timeout_seconds`：省略时为 1800 秒（30 分钟），设为

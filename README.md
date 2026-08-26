@@ -10,7 +10,7 @@ The core has only three responsibilities:
 - context commits;
 - the Agent/ReAct loop.
 
-Tools, System Prompt changes, model parameter changes, input processing, context processing, and lifecycle notifications are all implemented through WASM extensions. The core contains no hard-coded tool. The Shell component in this repository is an optional example extension.
+Tools, System Prompt changes, model parameter changes, input processing, context processing, and lifecycle notifications are all implemented through WASM extensions. The core contains no hard-coded tool. The Shell and File Editor components in this repository are optional example extensions.
 
 ## How it works
 
@@ -32,13 +32,13 @@ Extensions use a single WIT Component ABI and a JSON Hook protocol. For the arch
 ## Requirements
 
 - Rust toolchain
-- The `wasm32-unknown-unknown` target when building the example extension
+- The `wasm32-wasip2` target when building extensions
 - A model service compatible with the OpenAI Responses API
 
 Install the Rust WASM target:
 
 ```sh
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32-wasip2
 ```
 
 ## Build
@@ -49,28 +49,37 @@ Build the Agent:
 cargo build --release
 ```
 
-Build the bundled Shell example extension:
+Build the bundled extensions (`shell` and `file_editor`):
 
 ```sh
+# Build all extensions (default)
 ./scripts/build-extensions.sh
+
+# Or build specific extensions (comma-separated list)
+./scripts/build-extensions.sh shell
+./scripts/build-extensions.sh shell,file_editor
 ```
 
-The generated Component is written to:
+The generated Components are written to:
 
 ```text
-extensions/shell/target/component/ragent_shell_extension.wasm
+extensions/shell/target/wasm32-wasip2/release/ragent_shell_extension.wasm
+extensions/file_editor/target/wasm32-wasip2/release/ragent_file_editor_extension.wasm
 ```
 
-Build and install or update it in the active ragent configuration directory:
+Build and install or update them in the active ragent configuration directory:
 
 ```sh
+# Install all extensions (default)
 ./scripts/install-extensions.sh
+
+# Or install specific extensions
+./scripts/install-extensions.sh shell
+./scripts/install-extensions.sh file_editor
 ```
 
 The install/update script follows `XDG_CONFIG_HOME` when set, otherwise it uses
-`~/.config/ragent`. It atomically replaces `extensions/shell.wasm`. If
-`config.toml` does not exist, it creates the Shell configuration shown below;
-an existing configuration is never modified during installation or updates.
+`~/.config/ragent`. It atomically replaces installed extensions (`extensions/shell.wasm`, `extensions/file_editor.wasm`). If `config.toml` does not exist, it creates the default configuration; if `config.toml` already exists, it checks and appends missing extension entries to the end of the file without duplicating existing configurations.
 
 ## Configuration
 
@@ -83,7 +92,7 @@ export MODEL_NAME="your-model"
 ```
 
 Extensions are loaded from `~/.config/ragent/config.toml`. The installation
-script creates the following configuration for a first-time installation:
+script creates the following configuration:
 
 ```toml
 [[extensions]]
@@ -93,6 +102,11 @@ enabled = true
 
 [extensions.config]
 default_timeout_seconds = 1800
+
+[[extensions]]
+name = "file_editor"
+path = "extensions/file_editor.wasm"
+enabled = true
 ```
 
 The configuration file currently only discovers extensions and supplies their initialization configuration. Relative paths are resolved from `~/.config/ragent/`.
@@ -150,9 +164,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-The Shell extension tests cover successful commands, non-zero exit codes,
-configured timeouts, per-call overrides, and timeout disabling. A non-zero exit
-code or timeout is returned to the Agent as a failed tool result.
+The extension tests cover:
+- Shell: successful commands, non-zero exit codes, configured timeouts, per-call overrides, and timeout disabling.
+- File Editor: file creation and full overwriting (`write_file`), unique search-and-replace (`replace_in_file`), non-unique match rejections, and failure error handling.
 
 ## Repository layout
 
@@ -161,7 +175,6 @@ src/agent.rs              Agent I/O and loop
 src/context.rs            context storage and commits
 src/wasm/                 WASM loading, dispatch, and protocol types
 wit/ragent-extension.wit  Component ABI
-extensions/               optional bundled extension examples
-tools/componentize/       generic Core Wasm to Component converter
+extensions/               optional bundled extension examples (shell, file_editor)
 EXTENSIONS.md             extension development and Hook protocol
 ```

@@ -5,6 +5,9 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store};
+use wasmtime_wasi::{
+    DirPerms, FilePerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
+};
 
 wasmtime::component::bindgen!({
     path: "wit",
@@ -13,7 +16,19 @@ wasmtime::component::bindgen!({
     exports: { default: async },
 });
 
-struct HostState;
+struct HostState {
+    wasi_ctx: WasiCtx,
+    table: ResourceTable,
+}
+
+impl WasiView for HostState {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi_ctx,
+            table: &mut self.table,
+        }
+    }
+}
 
 impl ragent::extension::host::Host for HostState {
     async fn execute_command_with_timeout(
@@ -79,9 +94,25 @@ impl WasmPlugin {
         })?;
 
         let mut linker = Linker::new(&engine);
+        // Link WASI 0.2 (P2)
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(tool_error)?;
+        // Link project lifecycle & host interfaces
         Plugin::add_to_linker::<_, wasmtime::component::HasSelf<_>>(&mut linker, |state| state)
             .map_err(tool_error)?;
-        let mut store = Store::new(&engine, HostState);
+
+        let mut wasi_builder = WasiCtxBuilder::new();
+        wasi_builder.inherit_stdout().inherit_stderr();
+        // 默认预授权当前目录及其子目录
+        if let Err(e) = wasi_builder.preopened_dir(".", ".", DirPerms::all(), FilePerms::all()) {
+            eprintln!("Warning: failed to preopen current directory: {e}");
+        }
+
+        let host_state = HostState {
+            wasi_ctx: wasi_builder.build(),
+            table: ResourceTable::new(),
+        };
+
+        let mut store = Store::new(&engine, host_state);
         let bindings = Plugin::instantiate_async(&mut store, &component, &linker)
             .await
             .map_err(tool_error)?;

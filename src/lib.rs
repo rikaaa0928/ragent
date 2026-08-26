@@ -33,7 +33,13 @@ mod tests {
 
     fn shell_component_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("extensions/shell/target/component/ragent_shell_extension.wasm")
+            .join("extensions/shell/target/wasm32-wasip2/release/ragent_shell_extension.wasm")
+    }
+
+    fn file_editor_component_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "extensions/file_editor/target/wasm32-wasip2/release/ragent_file_editor_extension.wasm",
+        )
     }
 
     #[tokio::test]
@@ -262,6 +268,217 @@ mod tests {
         let result: ToolResult = serde_json::from_value(result).unwrap();
         assert!(result.success);
         assert!(result.output.contains("no-timeout"));
+    }
+
+    #[tokio::test]
+    async fn file_editor_component_write_and_replace_test() {
+        let plugin = WasmPlugin::load_from_file("file_editor", &file_editor_component_path())
+            .await
+            .unwrap();
+        let mut manager = ExtensionManager::empty();
+        manager.add_plugin(plugin).unwrap();
+        manager.initialize().await.unwrap();
+
+        let (draft, _) = manager
+            .transform_agent_draft(
+                HOOK_AGENT_PREPARE,
+                None,
+                AgentDraft {
+                    system_prompt: "test".into(),
+                    model: ModelDraft {
+                        name: "test".into(),
+                        temperature: None,
+                        max_output_tokens: None,
+                    },
+                    tools: vec![],
+                    context: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(draft.tools.len(), 2);
+        assert!(draft
+            .tools
+            .iter()
+            .any(|t| t.definition.name == "write_file"));
+        assert!(draft
+            .tools
+            .iter()
+            .any(|t| t.definition.name == "replace_in_file"));
+
+        let test_file_rel = "target/test_file_editor_temp.txt";
+        let _ = std::fs::remove_file(test_file_rel);
+
+        // 1. 测试 write_file
+        let write_call = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                "file_editor",
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-wf".into(),
+                    tool_id: "tool-wf".into(),
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({
+                        "path": test_file_rel,
+                        "content": "line 1\nline 2\nline 3\nline 2\n"
+                    }),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let write_res: ToolResult = serde_json::from_value(write_call).unwrap();
+        assert!(write_res.success);
+        assert_eq!(
+            std::fs::read_to_string(test_file_rel).unwrap(),
+            "line 1\nline 2\nline 3\nline 2\n"
+        );
+
+        // 2. 测试 replace_in_file 唯一定位替换
+        let replace_call = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                "file_editor",
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-rf-1".into(),
+                    tool_id: "tool-rf-1".into(),
+                    name: "replace_in_file".into(),
+                    arguments: serde_json::json!({
+                        "path": test_file_rel,
+                        "replacements": [
+                            {
+                                "old_str": "line 1\nline 2",
+                                "new_str": "first line\nsecond line"
+                            }
+                        ]
+                    }),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let replace_res: ToolResult = serde_json::from_value(replace_call).unwrap();
+        assert!(replace_res.success);
+        assert_eq!(
+            std::fs::read_to_string(test_file_rel).unwrap(),
+            "first line\nsecond line\nline 3\nline 2\n"
+        );
+        // 3. 测试 replace_in_file 未找到 old_str 报错
+        let not_found_call = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                "file_editor",
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-rf-2".into(),
+                    tool_id: "tool-rf-2".into(),
+                    name: "replace_in_file".into(),
+                    arguments: serde_json::json!({
+                        "path": test_file_rel,
+                        "replacements": [
+                            {
+                                "old_str": "non_existent_string",
+                                "new_str": "new_string"
+                            }
+                        ]
+                    }),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let not_found_res: ToolResult = serde_json::from_value(not_found_call).unwrap();
+        assert!(!not_found_res.success);
+        assert!(not_found_res.output.contains("not found"));
+
+        // 4. 测试 replace_in_file 命中多处 (不唯一) 报错拦截且未修改文件
+        let content_before = std::fs::read_to_string(test_file_rel).unwrap();
+        let not_unique_call = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                "file_editor",
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-rf-3".into(),
+                    tool_id: "tool-rf-3".into(),
+                    name: "replace_in_file".into(),
+                    arguments: serde_json::json!({
+                        "path": test_file_rel,
+                        "replacements": [
+                            {
+                                "old_str": "line", // 在当前文件中出现了多次 (second line, line 3, line 2)
+                                "new_str": "LINE"
+                            }
+                        ]
+                    }),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let not_unique_res: ToolResult = serde_json::from_value(not_unique_call).unwrap();
+        assert!(!not_unique_res.success);
+        assert!(not_unique_res.output.contains("not unique"));
+        assert_eq!(
+            std::fs::read_to_string(test_file_rel).unwrap(),
+            content_before
+        );
+
+        // 5. 测试写入失败路径（如写入目标路径为已存在的目录）
+        let write_fail_call = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                "file_editor",
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-wf-fail".into(),
+                    tool_id: "tool-wf-fail".into(),
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({
+                        "path": "target", // target 是一个已有目录
+                        "content": "some content"
+                    }),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let write_fail_res: ToolResult = serde_json::from_value(write_fail_call).unwrap();
+        assert!(!write_fail_res.success);
+        assert!(write_fail_res.output.contains("failed to write file"));
+
+        // 6. 测试增量编辑失败路径（如目标文件不存在）
+        let replace_fail_call = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                "file_editor",
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-rf-fail".into(),
+                    tool_id: "tool-rf-fail".into(),
+                    name: "replace_in_file".into(),
+                    arguments: serde_json::json!({
+                        "path": "target/non_existent_file_for_replace.txt",
+                        "replacements": [
+                            {
+                                "old_str": "abc",
+                                "new_str": "def"
+                            }
+                        ]
+                    }),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let replace_fail_res: ToolResult = serde_json::from_value(replace_fail_call).unwrap();
+        assert!(!replace_fail_res.success);
+        assert!(replace_fail_res.output.contains("failed to read file"));
+
+        let _ = std::fs::remove_file(test_file_rel);
     }
 
     #[tokio::test]

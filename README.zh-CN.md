@@ -10,7 +10,7 @@
 - 上下文提交
 - Agent/ReAct 循环
 
-工具、System Prompt 调整、模型参数调整、输入处理、上下文处理以及各阶段通知都通过 WASM 扩展完成。项目本身不硬编码任何内置工具；仓库中的 Shell 仅是一个可选示例扩展。
+工具、System Prompt 调整、模型参数调整、输入处理、上下文处理以及各阶段通知都通过 WASM 扩展完成。项目本身不硬编码任何内置工具；仓库中提供了可选的 Shell 与 File Editor 示例扩展。
 
 ## 工作方式
 
@@ -32,13 +32,13 @@
 ## 环境要求
 
 - Rust 工具链
-- 构建示例扩展时需要 `wasm32-unknown-unknown` target
+- 构建扩展时需要 `wasm32-wasip2` target
 - 一个兼容 OpenAI Responses API 的模型服务
 
 安装 Rust WASM target：
 
 ```sh
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32-wasip2
 ```
 
 ## 构建
@@ -49,27 +49,37 @@ rustup target add wasm32-unknown-unknown
 cargo build --release
 ```
 
-构建仓库提供的 Shell 示例扩展：
+构建仓库提供的示例扩展（`shell` 和 `file_editor`）：
 
 ```sh
+# 默认构建所有扩展
 ./scripts/build-extensions.sh
+
+# 或指定构建部分扩展（逗号分隔）
+./scripts/build-extensions.sh shell
+./scripts/build-extensions.sh shell,file_editor
 ```
 
 生成的 Component 位于：
 
 ```text
-extensions/shell/target/component/ragent_shell_extension.wasm
+extensions/shell/target/wasm32-wasip2/release/ragent_shell_extension.wasm
+extensions/file_editor/target/wasm32-wasip2/release/ragent_file_editor_extension.wasm
 ```
 
 构建并安装或更新到当前 ragent 配置目录：
 
 ```sh
+# 默认安装所有扩展
 ./scripts/install-extensions.sh
+
+# 或指定安装部分扩展
+./scripts/install-extensions.sh shell
+./scripts/install-extensions.sh file_editor
 ```
 
 安装/更新脚本优先使用 `XDG_CONFIG_HOME`，未设置时使用 `~/.config/ragent`。它会原子
-替换 `extensions/shell.wasm`；若 `config.toml` 不存在，则创建下文所示的 Shell
-配置，安装或更新时绝不会修改已有配置文件。
+替换安装的扩展（`extensions/shell.wasm`、`extensions/file_editor.wasm`）；若 `config.toml` 不存在，则创建默认配置；若 `config.toml` 已存在，则智能检查并在末尾追加缺失的扩展项，避免重复添加或破坏已有配置。
 
 ## 配置
 
@@ -91,6 +101,11 @@ enabled = true
 
 [extensions.config]
 default_timeout_seconds = 1800
+
+[[extensions]]
+name = "file_editor"
+path = "extensions/file_editor.wasm"
+enabled = true
 ```
 
 配置文件当前只负责发现扩展和传递扩展初始化配置。相对路径以 `~/.config/ragent/` 为基准。
@@ -146,8 +161,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-Shell 扩展测试覆盖成功命令、非零退出码、配置默认超时、单次覆盖和禁用超时；
-非零退出码与超时都会作为失败结果返回给 Agent。
+扩展测试覆盖：
+- Shell: 成功命令、非零退出码、配置默认超时、单次覆盖和禁用超时。
+- File Editor: 全量创建与写入 (`write_file`)、唯一性增量查找替换 (`replace_in_file`)、多处匹配拦截报错、错误路径处理。
 
 ## 项目结构
 
@@ -156,7 +172,6 @@ src/agent.rs              Agent I/O 与 loop
 src/context.rs            上下文保存与提交
 src/wasm/                 WASM 加载、调度和协议类型
 wit/ragent-extension.wit  Component ABI
-extensions/               仓库提供的可选扩展示例
-tools/componentize/       通用 Core Wasm 到 Component 转换器
+extensions/               仓库提供的可选扩展示例 (shell, file_editor)
 EXTENSIONS.zh-CN.md       扩展开发与 Hook 协议
 ```

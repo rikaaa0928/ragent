@@ -2,7 +2,7 @@
 
 # ragent extension development and Hook protocol
 
-This document describes the WASM Component extension protocol implemented by the current code. See [`wit/ragent-extension.wit`](wit/ragent-extension.wit) for the ABI, [`src/wasm/types.rs`](src/wasm/types.rs) for the Rust data structures, and [`extensions/shell`](extensions/shell) for a complete working extension.
+This document describes the WASM Component extension protocol implemented by the current code. See [`wit/ragent-extension.wit`](wit/ragent-extension.wit) for the ABI, [`src/wasm/types.rs`](src/wasm/types.rs) for the Rust data structures, and the complete examples in [`extensions/shell`](extensions/shell) and [`extensions/file_editor`](extensions/file_editor).
 
 ## 1. Design goals
 
@@ -15,7 +15,7 @@ The Agent core only owns model I/O, context commits, and loop control. Extension
 - pending context commits;
 - the decision to continue the loop.
 
-WASM is a cross-language extension format here, not a security sandbox. Host capabilities are determined by WIT imports. The current host provides only `host.execute-command-with-timeout`, which executes commands directly on the host through `sh -c`. Do not load an untrusted Shell extension.
+WASM is a cross-language extension format here, not a security sandbox. Host capabilities are determined by WIT imports. The project host interface can execute commands through `sh -c`, and the runtime links supported WASI 0.2 interfaces. Do not load untrusted extensions.
 
 ## 2. Component ABI
 
@@ -780,7 +780,7 @@ The core deserializes `next` and checks that System Messages stay outside Items,
 
 ## 8. Developing in Rust
 
-Rust is the fully verified path in this repository. The easiest starting point is [`extensions/shell`](extensions/shell).
+Rust is the fully verified path in this repository. The easiest starting point is [`extensions/shell`](extensions/shell) or [`extensions/file_editor`](extensions/file_editor).
 
 `Cargo.toml`:
 
@@ -835,21 +835,18 @@ impl exports::ragent::extension::lifecycle::Guest for Extension {
 export!(Extension);
 ```
 
-Build core Wasm and convert it to a Component:
+Build the Component directly with Rust's WASIp2 target:
 
 ```sh
-cargo build --target wasm32-unknown-unknown --release
-cargo run --manifest-path /path/to/ragent/tools/componentize/Cargo.toml -- \
-  target/wasm32-unknown-unknown/release/example.wasm \
-  example.component.wasm
+cargo build --target wasm32-wasip2 --release
 ```
 
-The generic converter lives in [`tools/componentize`](tools/componentize). It is shared by all Rust extensions whose core Wasm already contains WIT metadata. [`scripts/build-extensions.sh`](scripts/build-extensions.sh) implements this exact process for the bundled Shell extension.
+The resulting `target/wasm32-wasip2/release/example.wasm` is already a Component. [`scripts/build-extensions.sh`](scripts/build-extensions.sh) uses this path for both bundled extensions.
 
-For the bundled extension, [`scripts/install-extensions.sh`](scripts/install-extensions.sh)
-runs that build and atomically installs or updates `shell.wasm` under the active
-ragent configuration directory. It creates a default `config.toml` only when
-none exists; updates never rewrite an existing configuration.
+For the bundled extensions, [`scripts/install-extensions.sh`](scripts/install-extensions.sh)
+runs that build and atomically installs or updates the selected `.wasm` files.
+It also atomically appends any missing selected-extension entries to `config.toml`
+without changing entries that already exist.
 
 ## 9. Developing in Go
 
@@ -878,7 +875,7 @@ wasm-tools component new core-with-wit.wasm -o extension.wasm \
   --adapt wasi_snapshot_preview1.reactor.wasm
 ```
 
-ragent currently links only `ragent:extension/host`, not general WASI interfaces. A Go result that still imports `wasi:*` fails during loading. Inspect it with `wasm-tools component wit`. Until the host supports WASI, Go is an experimental path that requires resolving those imports yourself.
+ragent links the project `ragent:extension/host` interface and the WASI 0.2 interfaces provided by `wasmtime-wasi`. Inspect the final imports with `wasm-tools component wit`; imports outside those sets, including `wasi:http`, still fail during loading.
 
 ## 10. Developing in AssemblyScript
 
@@ -902,7 +899,7 @@ These commands do not generate the Canonical ABI. Without step 2, conversion or 
 
 The practical TypeScript alternative is to compile application logic to ESM JavaScript and use Bytecode Alliance [`ComponentizeJS`](https://github.com/bytecodealliance/ComponentizeJS). This is not an AssemblyScript binary pipeline, but it generates a Component directly from TypeScript/JavaScript logic.
 
-Because ragent does not provide WASI imports, use the ComponentizeJS Node API to disable `stdio`, `random`, `clocks`, `http`, and `fetch-event`, producing a pure component that depends only on the target WIT world.
+ragent provides the core WASI 0.2 interfaces from `wasmtime-wasi`, but not `wasi:http`. Configure ComponentizeJS so that the generated imports are limited to the project world and supported WASI 0.2 interfaces; disable `http` and `fetch-event` unless the host gains those interfaces.
 
 ## 11. Developing in Python
 
@@ -930,7 +927,7 @@ componentize-py -d /path/to/ragent/wit -w plugin \
   componentize --stub-wasi app -o extension.wasm
 ```
 
-Use `--stub-wasi`, or otherwise ensure that the Component has no WASI imports unsupported by the host. Python packages the interpreter with the application, so its Component is normally much larger and slower to load than a Rust extension.
+Use `--stub-wasi` when the generated Component requires interfaces outside the host's supported WASI 0.2 set. Always inspect the final imports before loading. Python packages the interpreter with the application, so its Component is normally much larger and slower to load than a Rust extension.
 
 ## 12. Inspecting a Component
 
@@ -941,7 +938,7 @@ wasm-tools validate extension.wasm --features component-model
 wasm-tools component wit extension.wasm
 ```
 
-The extracted world must be compatible with `ragent:extension/plugin@1.0.0`. The current host permits only `ragent:extension/host` from the project WIT. A result containing `wasi:*` or another import cannot currently be instantiated by ragent.
+The extracted world must be compatible with `ragent:extension/plugin@1.0.0`. The host links `ragent:extension/host` plus the WASI 0.2 interfaces supplied by `wasmtime-wasi`; any other import, including `wasi:http`, cannot currently be instantiated.
 
 Test loading with a temporary configuration:
 
@@ -974,6 +971,11 @@ enabled = true
 
 [extensions.config]
 default_timeout_seconds = 1800
+
+[[extensions]]
+name = "file_editor"
+path = "extensions/file_editor.wasm"
+enabled = true
 ```
 
 The Shell extension accepts `default_timeout_seconds`. Omit it for 1,800 seconds
