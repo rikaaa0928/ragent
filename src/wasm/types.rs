@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use openresponses_rust::{FunctionOutput, MessageContent};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub const HOOK_AGENT_PREPARE: &str = "agent.prepare";
 pub const HOOK_INPUT_PREPARE: &str = "input.prepare";
@@ -138,27 +139,116 @@ pub struct ToolCallRequest {
     pub arguments: serde_json::Value,
 }
 
+/// 工具执行内容的表达，支持纯文本字符串或多模态内容数组。
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolOutput {
+    Text(String),
+    Parts(Vec<MessageContent>),
+}
+
+impl ToolOutput {
+    pub fn to_display_string(&self) -> String {
+        match self {
+            ToolOutput::Text(text) => text.clone(),
+            ToolOutput::Parts(parts) => {
+                let texts: Vec<&str> = parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        MessageContent::InputText { text }
+                        | MessageContent::PlainText { text }
+                        | MessageContent::OutputText { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                if texts.is_empty() {
+                    format!("[{} content part(s)]", parts.len())
+                } else {
+                    texts.join("\n")
+                }
+            }
+        }
+    }
+
+    pub fn to_function_output(&self) -> FunctionOutput {
+        match self {
+            ToolOutput::Text(text) => FunctionOutput::Text(text.clone()),
+            ToolOutput::Parts(parts) => FunctionOutput::Content(parts.clone()),
+        }
+    }
+}
+
+impl Serialize for ToolOutput {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            ToolOutput::Text(s) => serializer.serialize_str(s),
+            ToolOutput::Parts(vec) => vec.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolOutput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(s) = value.as_str() {
+            return Ok(ToolOutput::Text(s.to_string()));
+        }
+        if value.is_array() {
+            let parts: Vec<MessageContent> =
+                serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            return Ok(ToolOutput::Parts(parts));
+        }
+        Err(serde::de::Error::custom(
+            "ToolOutput must be a string or an array of MessageContent",
+        ))
+    }
+}
+
+impl From<String> for ToolOutput {
+    fn from(s: String) -> Self {
+        ToolOutput::Text(s)
+    }
+}
+
+impl From<&str> for ToolOutput {
+    fn from(s: &str) -> Self {
+        ToolOutput::Text(s.to_string())
+    }
+}
+
+impl From<Vec<MessageContent>> for ToolOutput {
+    fn from(v: Vec<MessageContent>) -> Self {
+        ToolOutput::Parts(v)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub success: bool,
-    pub output: String,
+    pub output: ToolOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 impl ToolResult {
-    pub fn ok(output: impl Into<String>) -> Self {
+    pub fn ok(output: impl Into<ToolOutput>) -> Self {
         Self {
             success: true,
             output: output.into(),
             error: None,
         }
     }
+
     pub fn err(error: impl Into<String>) -> Self {
         let error = error.into();
         Self {
             success: false,
-            output: error.clone(),
+            output: ToolOutput::Text(error.clone()),
             error: Some(error),
         }
     }

@@ -2,7 +2,7 @@
 
 # ragent 扩展开发与 Hook 协议
 
-本文档描述当前代码已经实现的 WASM Component 扩展协议。协议入口见 [`wit/ragent-extension.wit`](wit/ragent-extension.wit)，Rust 数据结构见 [`src/wasm/types.rs`](src/wasm/types.rs)，可运行的完整示例见 [`extensions/shell`](extensions/shell) 和 [`extensions/file_editor`](extensions/file_editor)。
+本文档描述当前代码已经实现的 WASM Component 扩展协议。协议入口见 [`wit/ragent-extension.wit`](wit/ragent-extension.wit)，Rust 数据结构见 [`src/wasm/types.rs`](src/wasm/types.rs)，可运行的完整示例见 [`extensions/shell`](extensions/shell)、[`extensions/file_editor`](extensions/file_editor) 和 [`extensions/image_viewer`](extensions/image_viewer)。
 
 ## 1. 设计目标
 
@@ -290,7 +290,7 @@ interface ToolCallRequest {
 
 interface ToolResult {
   success: boolean;
-  output: string;
+  output: string | InputContent[];
   error?: string | null;
 }
 
@@ -449,11 +449,14 @@ interface LogProb extends TopLogProb {
   top_logprobs: TopLogProb[];
 }
 
-type MessageContent =
+type InputContent =
   | { type: "input_text"; text: string }
   | { type: "input_image"; image_url?: string; detail?: ImageDetail }
   | { type: "input_file"; filename?: string; file_data?: string; file_url?: string }
-  | { type: "input_video"; video_url: string }
+  | { type: "input_video"; video_url: string };
+
+type MessageContent =
+  | InputContent
   | {
       type: "output_text";
       text: string;
@@ -487,7 +490,7 @@ interface FunctionCallOutputItem {
   type: "function_call_output";
   id?: string;
   call_id: string;
-  output: string | MessageContent[];
+  output: string | InputContent[];
   status?: ItemStatus;
 }
 
@@ -747,6 +750,25 @@ Action 必须返回：
 }
 ```
 
+或者返回结构化多模态内容（如图片）：
+
+```json
+{
+  "action": "continue",
+  "payload": {
+    "success": true,
+    "output": [
+      { "type": "input_text", "text": "Image Metadata:\n..." },
+      { "type": "input_image", "image_url": "data:image/png;base64,..." }
+    ],
+    "error": null
+  }
+}
+```
+
+- `output`：工具执行结果内容，既支持直接返回纯文本字符串 `string`，也支持返回多模态结构化输入内容数组 `InputContent[]`（如 `input_text`、`input_image`、`input_file`、`input_video`）。核心在生成 `function_call_output` 时会直接转换为 `FunctionOutput`（`Text` 或 `Content`）提交给模型上下文，并在事件日志中自动提取摘要文本展示。
+- `error`（可选）：失败原因。
+
 工具失败也应返回正常的 HookResult，并令 `success = false`；只有扩展协议本身失败时才返回 WIT `err(string)`。
 
 仓库内置的 Shell 示例中，`timeout_seconds` 是可选参数。扩展依次取单次参数、
@@ -775,7 +797,7 @@ Action 必须返回：
 
 ## 8. 用 Rust 开发
 
-Rust 是当前仓库完整验证的开发路径。最简单的方式是复制 [`extensions/shell`](extensions/shell) 或 [`extensions/file_editor`](extensions/file_editor)。
+Rust 是当前仓库完整验证的开发路径。最简单的方式是复制 [`extensions/shell`](extensions/shell)、[`extensions/file_editor`](extensions/file_editor) 或 [`extensions/image_viewer`](extensions/image_viewer)。
 
 `Cargo.toml`：
 
@@ -966,6 +988,11 @@ default_timeout_seconds = 1800
 [[extensions]]
 name = "file_editor"
 path = "extensions/file_editor.wasm"
+enabled = true
+
+[[extensions]]
+name = "image_viewer"
+path = "extensions/image_viewer.wasm"
 enabled = true
 ```
 

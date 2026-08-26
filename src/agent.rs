@@ -589,7 +589,7 @@ impl Agent {
         self.event_handler.on_event(&AgentEvent::ToolCallFinished {
             call_id: call_id.clone(),
             tool_name: name,
-            output: result.output.clone(),
+            output: result.output.to_display_string(),
             is_error: !result.success,
             duration_ms: started.elapsed().as_millis(),
         });
@@ -597,7 +597,7 @@ impl Agent {
             Some(Item::FunctionCallOutput {
                 id: None,
                 call_id,
-                output: FunctionOutput::Text(result.output),
+                output: result.output.to_function_output(),
                 status: None,
             }),
             FlowControl::Continue,

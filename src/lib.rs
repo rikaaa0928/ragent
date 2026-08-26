@@ -42,6 +42,12 @@ mod tests {
         )
     }
 
+    fn image_viewer_component_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "extensions/image_viewer/target/wasm32-wasip2/release/ragent_image_viewer_extension.wasm",
+        )
+    }
+
     #[tokio::test]
     async fn builder_and_context_do_not_duplicate_system_prompt() {
         let config = AgentConfig::new("https://example.com", "fake_key", "test-model")
@@ -153,7 +159,7 @@ mod tests {
             .unwrap();
         let success: ToolResult = serde_json::from_value(success).unwrap();
         assert!(success.success);
-        assert!(success.output.contains("hello"));
+        assert!(success.output.to_display_string().contains("hello"));
 
         let failure = manager
             .action(
@@ -173,7 +179,7 @@ mod tests {
         let failure: ToolResult = serde_json::from_value(failure).unwrap();
         assert!(!failure.success);
         assert!(failure.error.is_some());
-        assert!(failure.output.contains("exit_code: 7"));
+        assert!(failure.output.to_display_string().contains("exit_code: 7"));
 
         let timed_out = manager
             .action(
@@ -192,7 +198,10 @@ mod tests {
             .unwrap();
         let timed_out: ToolResult = serde_json::from_value(timed_out).unwrap();
         assert!(!timed_out.success);
-        assert!(timed_out.output.contains("timed out after 1000 ms"));
+        assert!(timed_out
+            .output
+            .to_display_string()
+            .contains("timed out after 1000 ms"));
 
         let overridden = manager
             .action(
@@ -214,7 +223,7 @@ mod tests {
             .unwrap();
         let overridden: ToolResult = serde_json::from_value(overridden).unwrap();
         assert!(overridden.success);
-        assert!(overridden.output.contains("override"));
+        assert!(overridden.output.to_display_string().contains("override"));
     }
 
     #[tokio::test]
@@ -267,7 +276,7 @@ mod tests {
             .unwrap();
         let result: ToolResult = serde_json::from_value(result).unwrap();
         assert!(result.success);
-        assert!(result.output.contains("no-timeout"));
+        assert!(result.output.to_display_string().contains("no-timeout"));
     }
 
     #[tokio::test]
@@ -392,7 +401,10 @@ mod tests {
             .unwrap();
         let not_found_res: ToolResult = serde_json::from_value(not_found_call).unwrap();
         assert!(!not_found_res.success);
-        assert!(not_found_res.output.contains("not found"));
+        assert!(not_found_res
+            .output
+            .to_display_string()
+            .contains("not found"));
 
         // 4. 测试 replace_in_file 命中多处 (不唯一) 报错拦截且未修改文件
         let content_before = std::fs::read_to_string(test_file_rel).unwrap();
@@ -421,7 +433,10 @@ mod tests {
             .unwrap();
         let not_unique_res: ToolResult = serde_json::from_value(not_unique_call).unwrap();
         assert!(!not_unique_res.success);
-        assert!(not_unique_res.output.contains("not unique"));
+        assert!(not_unique_res
+            .output
+            .to_display_string()
+            .contains("not unique"));
         assert_eq!(
             std::fs::read_to_string(test_file_rel).unwrap(),
             content_before
@@ -448,7 +463,10 @@ mod tests {
             .unwrap();
         let write_fail_res: ToolResult = serde_json::from_value(write_fail_call).unwrap();
         assert!(!write_fail_res.success);
-        assert!(write_fail_res.output.contains("failed to write file"));
+        assert!(write_fail_res
+            .output
+            .to_display_string()
+            .contains("failed to write file"));
 
         // 6. 测试增量编辑失败路径（如目标文件不存在）
         let replace_fail_call = manager
@@ -476,9 +494,236 @@ mod tests {
             .unwrap();
         let replace_fail_res: ToolResult = serde_json::from_value(replace_fail_call).unwrap();
         assert!(!replace_fail_res.success);
-        assert!(replace_fail_res.output.contains("failed to read file"));
+        assert!(replace_fail_res
+            .output
+            .to_display_string()
+            .contains("failed to read file"));
 
         let _ = std::fs::remove_file(test_file_rel);
+    }
+
+    #[tokio::test]
+    async fn image_viewer_component_view_test() {
+        let plugin = WasmPlugin::load_from_file("image_viewer", &image_viewer_component_path())
+            .await
+            .unwrap();
+        let mut manager = ExtensionManager::empty();
+        manager
+            .add_plugin_with_config(
+                plugin,
+                serde_json::json!({
+                    "max_file_size_bytes": 1024 * 1024
+                }),
+            )
+            .unwrap();
+        manager.initialize().await.unwrap();
+
+        let (draft, _) = manager
+            .transform_agent_draft(
+                HOOK_AGENT_PREPARE,
+                None,
+                AgentDraft {
+                    system_prompt: "test".into(),
+                    model: ModelDraft {
+                        name: "test".into(),
+                        temperature: None,
+                        max_output_tokens: None,
+                    },
+                    tools: vec![],
+                    context: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(draft.tools.len(), 1);
+        assert_eq!(draft.tools[0].definition.name, "view_image");
+
+        // 1. 创建一个合法的 1x1 纯色 PNG 图片用于测试
+        // 1x1 transparent PNG binary:
+        let png_bytes: [u8; 67] = [
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // PNG signature
+            0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, // IHDR
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // width: 1, height: 1
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, // bit depth 8, RGBA
+            0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, // IDAT
+            0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d,
+            0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, // IEND
+            0x42, 0x60, 0x82,
+        ];
+        let test_img_path = "target/test_1x1_image.png";
+        std::fs::write(test_img_path, png_bytes).unwrap();
+
+        // 测试正常读取图片及默认附带 Base64
+        let view_call = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                "image_viewer",
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-view-1".into(),
+                    tool_id: "tool-view-1".into(),
+                    name: "view_image".into(),
+                    arguments: serde_json::json!({
+                        "path": test_img_path,
+                    }),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let view_res: ToolResult = serde_json::from_value(view_call).unwrap();
+        assert!(view_res.success);
+        assert!(view_res
+            .output
+            .to_display_string()
+            .contains("Format: image/png"));
+        assert!(view_res
+            .output
+            .to_display_string()
+            .contains("Dimensions: 1 x 1"));
+        assert!(matches!(view_res.output, ToolOutput::Parts(_)));
+
+        // 测试 include_base64 = false 时仅输出元数据
+        let view_meta_only_call = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                "image_viewer",
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-view-2".into(),
+                    tool_id: "tool-view-2".into(),
+                    name: "view_image".into(),
+                    arguments: serde_json::json!({
+                        "path": test_img_path,
+                        "include_base64": false
+                    }),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let view_meta_only_res: ToolResult = serde_json::from_value(view_meta_only_call).unwrap();
+        assert!(view_meta_only_res.success);
+        assert!(view_meta_only_res
+            .output
+            .to_display_string()
+            .contains("Dimensions: 1 x 1"));
+        assert!(matches!(view_meta_only_res.output, ToolOutput::Text(_)));
+
+        // 测试文件不存在错误
+        let not_found_call = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                "image_viewer",
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-view-3".into(),
+                    tool_id: "tool-view-3".into(),
+                    name: "view_image".into(),
+                    arguments: serde_json::json!({
+                        "path": "target/non_existent_img_xyz.png",
+                    }),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let not_found_res: ToolResult = serde_json::from_value(not_found_call).unwrap();
+        assert!(!not_found_res.success);
+        assert!(not_found_res
+            .output
+            .to_display_string()
+            .contains("failed to read image file"));
+
+        // 测试目录路径传入错误
+        let dir_call = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                "image_viewer",
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-view-4".into(),
+                    tool_id: "tool-view-4".into(),
+                    name: "view_image".into(),
+                    arguments: serde_json::json!({
+                        "path": "target",
+                    }),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let dir_res: ToolResult = serde_json::from_value(dir_call).unwrap();
+        assert!(!dir_res.success);
+        assert!(dir_res
+            .output
+            .to_display_string()
+            .contains("is a directory"));
+
+        // 测试不支持的格式（如 SVG、BMP、GIF 等被严格拦截）
+        let svg_path = "target/test_invalid_format.svg";
+        std::fs::write(svg_path, "<svg width='10' height='10'></svg>").unwrap();
+        let svg_call = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                "image_viewer",
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-view-5".into(),
+                    tool_id: "tool-view-5".into(),
+                    name: "view_image".into(),
+                    arguments: serde_json::json!({
+                        "path": svg_path,
+                    }),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let svg_res: ToolResult = serde_json::from_value(svg_call).unwrap();
+        assert!(!svg_res.success);
+        assert!(svg_res
+            .output
+            .to_display_string()
+            .contains("SVG format is not supported"));
+        let _ = std::fs::remove_file(svg_path);
+
+        // 测试 GIF 格式被明确拦截
+        let gif_path = "target/test_gif_format.gif";
+        let gif_bytes = [
+            0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xff,
+            0xff, 0xff, 0x00, 0x00, 0x00, 0x21, 0xf9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c,
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00,
+            0x3b,
+        ];
+        std::fs::write(gif_path, gif_bytes).unwrap();
+        let gif_call = manager
+            .action(
+                HOOK_TOOLS_CALL,
+                "image_viewer",
+                None,
+                serde_json::to_value(ToolCallRequest {
+                    call_id: "call-view-6".into(),
+                    tool_id: "tool-view-6".into(),
+                    name: "view_image".into(),
+                    arguments: serde_json::json!({
+                        "path": gif_path,
+                    }),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let gif_res: ToolResult = serde_json::from_value(gif_call).unwrap();
+        assert!(!gif_res.success);
+        assert!(gif_res
+            .output
+            .to_display_string()
+            .contains("GIF format is not supported"));
+        let _ = std::fs::remove_file(gif_path);
+
+        let _ = std::fs::remove_file(test_img_path);
     }
 
     #[tokio::test]

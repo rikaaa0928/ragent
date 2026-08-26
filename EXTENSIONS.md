@@ -2,7 +2,7 @@
 
 # ragent extension development and Hook protocol
 
-This document describes the WASM Component extension protocol implemented by the current code. See [`wit/ragent-extension.wit`](wit/ragent-extension.wit) for the ABI, [`src/wasm/types.rs`](src/wasm/types.rs) for the Rust data structures, and the complete examples in [`extensions/shell`](extensions/shell) and [`extensions/file_editor`](extensions/file_editor).
+This document describes the WASM Component extension protocol implemented by the current code. See [`wit/ragent-extension.wit`](wit/ragent-extension.wit) for the ABI, [`src/wasm/types.rs`](src/wasm/types.rs) for the Rust data structures, and the complete examples in [`extensions/shell`](extensions/shell), [`extensions/file_editor`](extensions/file_editor), and [`extensions/image_viewer`](extensions/image_viewer).
 
 ## 1. Design goals
 
@@ -290,7 +290,7 @@ interface ToolCallRequest {
 
 interface ToolResult {
   success: boolean;
-  output: string;
+  output: string | InputContent[];
   error?: string | null;
 }
 
@@ -449,11 +449,14 @@ interface LogProb extends TopLogProb {
   top_logprobs: TopLogProb[];
 }
 
-type MessageContent =
+type InputContent =
   | { type: "input_text"; text: string }
   | { type: "input_image"; image_url?: string; detail?: ImageDetail }
   | { type: "input_file"; filename?: string; file_data?: string; file_url?: string }
-  | { type: "input_video"; video_url: string }
+  | { type: "input_video"; video_url: string };
+
+type MessageContent =
+  | InputContent
   | {
       type: "output_text";
       text: string;
@@ -487,7 +490,7 @@ interface FunctionCallOutputItem {
   type: "function_call_output";
   id?: string;
   call_id: string;
-  output: string | MessageContent[];
+  output: string | InputContent[];
   status?: ItemStatus;
 }
 
@@ -749,6 +752,25 @@ The Action returns:
 }
 ```
 
+Or with structured multimodal content (e.g. image viewing):
+
+```json
+{
+  "action": "continue",
+  "payload": {
+    "success": true,
+    "output": [
+      { "type": "input_text", "text": "Image Metadata:\n..." },
+      { "type": "input_image", "image_url": "data:image/png;base64,..." }
+    ],
+    "error": null
+  }
+}
+```
+
+- `output`: The execution output of the tool. It supports either a plain text `string` or an allowed multimodal input content array `InputContent[]` (such as `input_text`, `input_image`, `input_file`, `input_video`). The core automatically maps it to `FunctionOutput` (`Text` or `Content`) in `function_call_output` for model context, while formatting text for console event logs.
+- `error` (optional): Error description if tool execution failed.
+
 A normal tool failure is still a successful WIT invocation with `success = false`. Return WIT `err(string)` only when the extension protocol itself fails.
 
 For the bundled Shell extension, `timeout_seconds` is optional. The extension
@@ -780,7 +802,7 @@ The core deserializes `next` and checks that System Messages stay outside Items,
 
 ## 8. Developing in Rust
 
-Rust is the fully verified path in this repository. The easiest starting point is [`extensions/shell`](extensions/shell) or [`extensions/file_editor`](extensions/file_editor).
+Rust is the fully verified path in this repository. The easiest starting point is [`extensions/shell`](extensions/shell), [`extensions/file_editor`](extensions/file_editor), or [`extensions/image_viewer`](extensions/image_viewer).
 
 `Cargo.toml`:
 
@@ -975,6 +997,11 @@ default_timeout_seconds = 1800
 [[extensions]]
 name = "file_editor"
 path = "extensions/file_editor.wasm"
+enabled = true
+
+[[extensions]]
+name = "image_viewer"
+path = "extensions/image_viewer.wasm"
 enabled = true
 ```
 

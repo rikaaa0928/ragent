@@ -49,7 +49,7 @@ Build the Agent:
 cargo build --release
 ```
 
-Build the bundled extensions (`shell` and `file_editor`):
+Build the bundled extensions (`shell`, `file_editor`, and `image_viewer`):
 
 ```sh
 # Build all extensions (default)
@@ -57,7 +57,7 @@ Build the bundled extensions (`shell` and `file_editor`):
 
 # Or build specific extensions (comma-separated list)
 ./scripts/build-extensions.sh shell
-./scripts/build-extensions.sh shell,file_editor
+./scripts/build-extensions.sh shell,file_editor,image_viewer
 ```
 
 The generated Components are written to:
@@ -65,6 +65,7 @@ The generated Components are written to:
 ```text
 extensions/shell/target/wasm32-wasip2/release/ragent_shell_extension.wasm
 extensions/file_editor/target/wasm32-wasip2/release/ragent_file_editor_extension.wasm
+extensions/image_viewer/target/wasm32-wasip2/release/ragent_image_viewer_extension.wasm
 ```
 
 Build and install or update them in the active ragent configuration directory:
@@ -79,7 +80,7 @@ Build and install or update them in the active ragent configuration directory:
 ```
 
 The install/update script follows `XDG_CONFIG_HOME` when set, otherwise it uses
-`~/.config/ragent`. It atomically replaces installed extensions (`extensions/shell.wasm`, `extensions/file_editor.wasm`). If `config.toml` does not exist, it creates the default configuration; if `config.toml` already exists, it checks and appends missing extension entries to the end of the file without duplicating existing configurations.
+`~/.config/ragent`. It atomically replaces installed extensions (`extensions/shell.wasm`, `extensions/file_editor.wasm`, `extensions/image_viewer.wasm`). If `config.toml` does not exist, it creates the default configuration; if `config.toml` already exists, it checks and appends missing extension entries to the end of the file without duplicating existing configurations.
 
 ## Configuration
 
@@ -106,6 +107,11 @@ default_timeout_seconds = 1800
 [[extensions]]
 name = "file_editor"
 path = "extensions/file_editor.wasm"
+enabled = true
+
+[[extensions]]
+name = "image_viewer"
+path = "extensions/image_viewer.wasm"
 enabled = true
 ```
 
@@ -175,6 +181,6 @@ src/agent.rs              Agent I/O and loop
 src/context.rs            context storage and commits
 src/wasm/                 WASM loading, dispatch, and protocol types
 wit/ragent-extension.wit  Component ABI
-extensions/               optional bundled extension examples (shell, file_editor)
+extensions/               optional bundled extension examples (shell, file_editor, image_viewer)
 EXTENSIONS.md             extension development and Hook protocol
 ```
