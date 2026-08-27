@@ -61,7 +61,7 @@ mod tests {
 
         assert_eq!(
             agent.context().system_prompt(),
-            Some("你是一个高效、精准的 AI 智能体助手")
+            Some("你是一个高效、精准、善于深度思考的 AI 智能体助手")
         );
         assert!(agent.context().items().is_empty());
     }
