@@ -323,7 +323,7 @@ interface AgentErrorPayload {
 
 ### 4.6 Open Responses request structures
 
-The `model.request.prepare` payload is a complete `CreateResponseBody`. The core initially sets only `model`, `input`, `instructions`, function tools, `tool_choice`, `temperature`, `max_output_tokens`, and `stream=true`, but an extension may operate on every supported field below:
+The `model.request.prepare` payload is a complete `CreateResponseBody`. The core initially sets only `model`, `input`, `instructions`, function tools, `tool_choice`, `temperature`, `max_output_tokens`, and `stream=false`, but an extension may operate on every supported field below:
 
 ```ts
 type IncludeOption =
@@ -419,7 +419,7 @@ interface CreateResponseBody {
 }
 ```
 
-The result must deserialize to this structure. The core additionally requires a present, non-empty `model`, valid `temperature`, and positive `max_output_tokens`. The Agent streaming loop depends on `stream=true`; extensions should not disable it.
+The result must deserialize to this structure. The core additionally requires a present, non-empty `model`, valid `temperature`, and positive `max_output_tokens`. The Agent performs synchronous, non-streaming model I/O, so `stream=true` and `background=true` are rejected.
 
 ### 4.7 Complete Context Item structure
 
@@ -537,12 +537,15 @@ Message content is also role-constrained: `user` permits the four `input_*` vari
 ### 4.8 Observer event structures
 
 ```ts
-type ModelStreamEvent =
-  | { type: "text_delta"; delta: string }
-  | { type: "output_item_added"; item: Item | null }
-  | { type: "output_item_done"; item: Item | null }
-  | { type: "error"; message: string }
-  | { type: "other" };
+interface ModelResponseObservePayload {
+  id: string;
+  status: "queued" | "in_progress" | "completed" | "failed" | "incomplete" | string;
+  output: Item[];
+  error: { code?: string; message: string; param?: string; type?: string } | null;
+  incomplete_details?: { reason: string };
+  usage?: JsonValue;
+  [key: string]: JsonValue;
+}
 
 type AgentShutdownPayload = Record<string, never>; // JSON {}
 ```
@@ -555,7 +558,7 @@ interface HookPayloadMap {
   "input.prepare": InputPreparePayload;
   "turn.prepare": AgentDraft;
   "model.request.prepare": CreateResponseBody;
-  "model.stream.observe": ModelStreamEvent;
+  "model.response.observe": ModelResponseObservePayload;
   "model.response.prepare": ModelResponsePayload;
   "tool.call.prepare": ToolCallRequest;
   "tools.call": ToolCallRequest;                 // Action result: ToolResult
@@ -665,8 +668,8 @@ each turn
   -> clone BaseAgentState + complete current context
   -> turn.prepare
   -> model.request.prepare
-  -> streaming model I/O
-       -> model.stream.observe for every normalized event
+  -> non-streaming model I/O
+  -> model.response.observe with the complete response resource
   -> model.response.prepare
   -> context.commit(reason=model_response)
   -> when tool calls exist:
@@ -702,8 +705,8 @@ Per-turn changes never mutate `BaseAgentState`. Use `agent.prepare` for persiste
 | `input.prepare` | Transform | Before user input is committed | `{text:string, delayed:bool}` | skip drops input; stop stops the run |
 | `turn.prepare` | Transform | Before each model request is built | `AgentDraft -> AgentDraft`, with read-only context | skip skips the turn; stop exits the loop |
 | `model.request.prepare` | Transform | Immediately before model I/O | Open Responses `CreateResponseBody` JSON | skip skips the turn; stop exits the loop |
-| `model.stream.observe` | Observer | For each streaming event | Normalized event JSON | Not applicable |
-| `model.response.prepare` | Transform | After the stream, before commit | `{text:string, items:Item[]}` | skip discards and retries next turn; stop exits |
+| `model.response.observe` | Observer | After response parsing, before status handling | Complete Open Responses `ResponseResource` JSON | Not applicable |
+| `model.response.prepare` | Transform | After a usable response, before commit | `{text:string, items:Item[]}` | skip discards and retries next turn; stop exits |
 | `tool.call.prepare` | Transform | Before the Action | `ToolCallRequest -> ToolCallRequest` | skip emits a skipped output; stop exits |
 | `tools.call` | Action | Actual tool execution | `ToolCallRequest -> ToolResult` | Actions reject skip/stop |
 | `tool.result.prepare` | Transform | Before committing tool output | `{call:ToolCallRequest,result:ToolResult}` | Current skip/stop retain the pre-Hook result |
@@ -712,19 +715,9 @@ Per-turn changes never mutate `BaseAgentState`. Use `agent.prepare` for persiste
 | `agent.error` | Observer | When `run()` returns an error | `{error:string}` | Observer errors do not replace the original error |
 | `agent.shutdown` | Observer | Before lifecycle shutdown | `{}` | Lifecycle shutdown still runs if the Observer fails |
 
-### 7.1 model.stream.observe
+### 7.1 model.response.observe
 
-Normalized events currently include:
-
-```json
-{"type":"text_delta","delta":"partial text"}
-{"type":"output_item_added","item":{}}
-{"type":"output_item_done","item":{}}
-{"type":"error","message":"..."}
-{"type":"other"}
-```
-
-This is a high-frequency Hook. Avoid expensive synchronous work.
+This Observer runs once after a successful HTTP request and JSON decode. Its payload is the complete Open Responses `ResponseResource`, including `status`, `output`, `error`, `incomplete_details`, and `usage`. It runs before the core rejects a failed response, so telemetry extensions can inspect model-level failures. Transport, HTTP, and JSON decoding failures have no response resource and are reported through `agent.error` instead.
 
 ### 7.2 ToolCallRequest and ToolResult
 
@@ -1045,7 +1038,7 @@ When multiple extensions subscribe to a Transform, execution is ordered first by
 - Use `failure = "abort"` while developing. Consider `ignore` later for optional enhancements.
 - Log `invocation_id`, `hook`, and `iteration`, but never API keys or sensitive context.
 - Keep Transforms close to pure functions. Put side effects in Actions or Observers.
-- Avoid blocking work in the high-frequency `model.stream.observe` Hook.
+- Use `model.response.observe` for response status, usage accounting, and model-error telemetry; use `model.response.prepare` only when the response content must be transformed.
 - Test successful execution, invalid arguments, host errors, and non-zero exit status for every tool.
 - Do not persist another extension's temporary tool ID. It is stable only within the current Agent process and draft chain.
 - If `wasm-tools validate` succeeds but loading fails, inspect unsupported extra imports first.

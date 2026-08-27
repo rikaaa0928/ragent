@@ -765,12 +765,16 @@ mod tests {
                 Ok(())
             }
         }
-        JsonLinesEventHandler::new(Box::new(Writer(Arc::clone(&bytes))))
-            .on_event(&AgentEvent::TextDelta { delta: "hi".into() });
+        JsonLinesEventHandler::new(Box::new(Writer(Arc::clone(&bytes)))).on_event(
+            &AgentEvent::TurnCompleted {
+                iteration: 1,
+                text: "hi".into(),
+            },
+        );
         let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(output.trim()).unwrap()["type"],
-            "text_delta"
+            "turn_completed"
         );
     }
 

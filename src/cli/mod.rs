@@ -29,7 +29,7 @@ pub struct ParsedCli {
 }
 
 pub fn print_help(program: &str) {
-    println!("ragent - 极简流式 LLM Agent 命令行工具\n");
+    println!("ragent - 极简 LLM Agent 命令行工具\n");
     println!("用法:");
     println!(
         "  {} \"<prompt>\" [-d <dir>]                  新建会话并执行",

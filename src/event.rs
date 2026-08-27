@@ -10,9 +10,7 @@ pub enum AgentEvent {
     MessageReceived { content: String, is_delayed: bool },
     /// 单轮循环/推理开始
     TurnStarted { iteration: usize },
-    /// 模型流式文本输出增量
-    TextDelta { delta: String },
-    /// 单轮流式文本输出完成
+    /// 单轮模型响应完成
     TurnCompleted { iteration: usize, text: String },
     /// 开始调用工具
     ToolCallStarted {
@@ -43,21 +41,14 @@ pub trait EventHandler: Send + Sync {
 
 /// 默认的控制台事件处理器（人类可读文本格式）
 pub struct ConsoleEventHandler {
-    pub show_deltas: bool,
     pub show_tool_output: bool,
 }
 
 impl ConsoleEventHandler {
     pub fn new() -> Self {
         Self {
-            show_deltas: true,
             show_tool_output: true,
         }
-    }
-
-    pub fn without_deltas(mut self) -> Self {
-        self.show_deltas = false;
-        self
     }
 }
 
@@ -84,14 +75,8 @@ impl EventHandler for ConsoleEventHandler {
             AgentEvent::TurnStarted { iteration } => {
                 println!("\n--- [Agent 轮次 {}] 模型思考/回复中 ---", iteration);
             }
-            AgentEvent::TextDelta { delta } => {
-                if self.show_deltas {
-                    print!("{}", delta);
-                    std::io::stdout().flush().ok();
-                }
-            }
             AgentEvent::TurnCompleted { text, .. } => {
-                if !self.show_deltas && !text.is_empty() {
+                if !text.is_empty() {
                     println!("{}", text);
                 } else {
                     println!();

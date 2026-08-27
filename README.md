@@ -2,11 +2,11 @@
 
 # ragent
 
-`ragent` is a minimal streaming LLM agent built around WebAssembly Component extensions.
+`ragent` is a minimal LLM agent built around WebAssembly Component extensions.
 
 The core has only three responsibilities:
 
-- model request and streaming response I/O;
+- non-streaming model request/response I/O;
 - context commits;
 - the Agent/ReAct loop.
 
@@ -18,7 +18,7 @@ Tools, System Prompt changes, model parameter changes, input processing, context
 user input
   -> WASM hooks
   -> build model request
-  -> streaming model I/O
+  -> non-streaming model I/O
   -> WASM hooks
   -> optional tool Action
   -> context commit

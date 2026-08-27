@@ -2,11 +2,11 @@
 
 # ragent
 
-`ragent` 是一个以 WebAssembly Component 扩展为核心的极简流式 LLM Agent。
+`ragent` 是一个以 WebAssembly Component 扩展为核心的极简 LLM Agent。
 
 本体只保留三类职责：
 
-- 模型请求与流式响应 I/O
+- 非流式模型请求与响应 I/O
 - 上下文提交
 - Agent/ReAct 循环
 
@@ -18,7 +18,7 @@
 用户输入
   -> WASM hooks
   -> 构造模型请求
-  -> 流式模型 I/O
+  -> 非流式模型 I/O
   -> WASM hooks
   -> 可选工具 Action
   -> 上下文提交

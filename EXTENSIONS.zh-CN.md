@@ -323,7 +323,7 @@ interface AgentErrorPayload {
 
 ### 4.6 Open Responses 请求结构
 
-`model.request.prepare` 的 payload 是完整的 `CreateResponseBody`。核心初始只设置 `model`、`input`、`instructions`、函数工具、`tool_choice`、`temperature`、`max_output_tokens` 和 `stream=true`，但扩展可以操作以下所有受支持字段：
+`model.request.prepare` 的 payload 是完整的 `CreateResponseBody`。核心初始只设置 `model`、`input`、`instructions`、函数工具、`tool_choice`、`temperature`、`max_output_tokens` 和 `stream=false`，但扩展可以操作以下所有受支持字段：
 
 ```ts
 type IncludeOption =
@@ -419,7 +419,7 @@ interface CreateResponseBody {
 }
 ```
 
-返回的请求必须能反序列化为上述结构。核心额外要求 `model` 存在且非空、`temperature` 合法、`max_output_tokens` 为正数。Agent 的流式循环依赖 `stream=true`；扩展不应将其关闭。
+返回的请求必须能反序列化为上述结构。核心额外要求 `model` 存在且非空、`temperature` 合法、`max_output_tokens` 为正数。Agent 使用同步非流式模型 I/O，因此会拒绝 `stream=true` 和 `background=true`。
 
 ### 4.7 Context Item 完整结构
 
@@ -537,12 +537,15 @@ Message 内容还受 role 约束：`user` 只允许四种 `input_*`；`system` �
 ### 4.8 Observer 事件结构
 
 ```ts
-type ModelStreamEvent =
-  | { type: "text_delta"; delta: string }
-  | { type: "output_item_added"; item: Item | null }
-  | { type: "output_item_done"; item: Item | null }
-  | { type: "error"; message: string }
-  | { type: "other" };
+interface ModelResponseObservePayload {
+  id: string;
+  status: "queued" | "in_progress" | "completed" | "failed" | "incomplete" | string;
+  output: Item[];
+  error: { code?: string; message: string; param?: string; type?: string } | null;
+  incomplete_details?: { reason: string };
+  usage?: JsonValue;
+  [key: string]: JsonValue;
+}
 
 type AgentShutdownPayload = Record<string, never>; // JSON {}
 ```
@@ -555,7 +558,7 @@ interface HookPayloadMap {
   "input.prepare": InputPreparePayload;
   "turn.prepare": AgentDraft;
   "model.request.prepare": CreateResponseBody;
-  "model.stream.observe": ModelStreamEvent;
+  "model.response.observe": ModelResponseObservePayload;
   "model.response.prepare": ModelResponsePayload;
   "tool.call.prepare": ToolCallRequest;
   "tools.call": ToolCallRequest;                 // Action 返回 ToolResult
@@ -665,8 +668,8 @@ interface HookPayloadMap {
   -> clone BaseAgentState + 当前完整上下文
   -> turn.prepare
   -> model.request.prepare
-  -> 模型流式 I/O
-       -> model.stream.observe（每个标准化事件）
+  -> 非流式模型 I/O
+  -> model.response.observe（完整响应资源）
   -> model.response.prepare
   -> context.commit(reason=model_response)
   -> 若包含工具调用：
@@ -700,8 +703,8 @@ interface HookPayloadMap {
 | `input.prepare` | Transform | 用户输入提交前 | `{text:string, delayed:bool}` | skip 丢弃输入；stop 停止运行 |
 | `turn.prepare` | Transform | 每轮构造请求前 | `AgentDraft -> AgentDraft`，含只读 context | skip 跳过本轮；stop 结束 loop |
 | `model.request.prepare` | Transform | 调用模型前 | Open Responses `CreateResponseBody` JSON | skip 跳过本轮；stop 结束 loop |
-| `model.stream.observe` | Observer | 每个流事件 | 标准化事件 JSON | 不适用 |
-| `model.response.prepare` | Transform | 流结束、提交前 | `{text:string, items:Item[]}` | skip 丢弃响应并进入下一轮；stop 结束 loop |
+| `model.response.observe` | Observer | 响应解析后、状态处理前 | 完整的 Open Responses `ResponseResource` JSON | 不适用 |
+| `model.response.prepare` | Transform | 得到可用响应后、提交前 | `{text:string, items:Item[]}` | skip 丢弃响应并进入下一轮；stop 结束 loop |
 | `tool.call.prepare` | Transform | Action 前 | `ToolCallRequest -> ToolCallRequest` | skip 生成“已跳过”工具输出；stop 结束 loop |
 | `tools.call` | Action | 实际执行工具 | `ToolCallRequest -> ToolResult` | Action 不允许 skip/stop |
 | `tool.result.prepare` | Transform | 工具结果提交前 | `{call:ToolCallRequest,result:ToolResult}` | 当前 skip/stop 均保留进入 Hook 前的结果 |
@@ -710,19 +713,9 @@ interface HookPayloadMap {
 | `agent.error` | Observer | `run()` 返回错误时 | `{error:string}` | 不适用；Observer 错误在此处不会覆盖原错误 |
 | `agent.shutdown` | Observer | 生命周期 shutdown 前 | `{}` | 不适用；即使 Observer 报错仍会调用 lifecycle shutdown |
 
-### 7.1 model.stream.observe
+### 7.1 model.response.observe
 
-标准化事件目前有：
-
-```json
-{"type":"text_delta","delta":"partial text"}
-{"type":"output_item_added","item":{}}
-{"type":"output_item_done","item":{}}
-{"type":"error","message":"..."}
-{"type":"other"}
-```
-
-这是高频 Hook。不要在里面执行昂贵的同步工作。
+HTTP 请求和 JSON 解码成功后，此 Observer 触发一次。payload 是完整的 Open Responses `ResponseResource`，包含 `status`、`output`、`error`、`incomplete_details` 和 `usage`。它在核心拒绝失败响应之前触发，因此遥测扩展可以检查模型级失败。传输、HTTP 和 JSON 解码失败没有响应资源，改由 `agent.error` 报告。
 
 ### 7.2 ToolCallRequest / ToolResult
 
@@ -1035,7 +1028,7 @@ deny_shell = true
 - `failure = "abort"` 适合开发期，可保留完整错误；可选增强功能上线后再考虑 `ignore`。
 - 在日志中记录 `invocation_id`、`hook`、`iteration`，不要记录 API Key 或敏感上下文。
 - Transform 应尽量保持纯函数；副作用放到 Action 或 Observer。
-- `model.stream.observe` 是高频路径，避免阻塞。
+- 响应状态、用量统计和模型错误遥测使用 `model.response.observe`；只有需要修改响应内容时才使用 `model.response.prepare`。
 - 工具扩展必须测试成功、参数错误、宿主错误、非零退出码四类结果。
 - 不要依赖另一个扩展生成的临时工具 ID；ID 只保证当前 Agent 进程和当前草稿链路内稳定。
 - 若 Component 能通过 `wasm-tools validate` 但无法加载，首先检查它是否含有宿主未链接的额外 imports。

@@ -5,10 +5,9 @@ use crate::event::{AgentEvent, EventHandler};
 use crate::sender::AgentSender;
 use crate::wasm::types::*;
 use crate::wasm::ExtensionManager;
-use futures::StreamExt;
 use openresponses_rust::{
-    CreateResponseBody, FunctionOutput, Input, Item, MessageContent, StreamingClient,
-    StreamingEvent, Tool, ToolChoiceParam,
+    Client, CreateResponseBody, FunctionOutput, Input, Item, MessageContent, ResponseStatus, Tool,
+    ToolChoiceParam,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -21,7 +20,7 @@ const DEFAULT_SYSTEM_PROMPT: &str = "你是一个高效、精准、善于深度�
 /// 只负责模型 I/O、上下文提交与 ReAct loop；其余行为由 WASM hook 提供。
 pub struct Agent {
     config: AgentConfig,
-    client: Arc<StreamingClient>,
+    client: Arc<Client>,
     context: AgentContext,
     base_draft: AgentDraft,
     extension_manager: ExtensionManager,
@@ -77,10 +76,7 @@ impl Agent {
         config.max_output_tokens = base_draft.model.max_output_tokens;
         config.reasoning = base_draft.model.reasoning.clone();
 
-        let client = Arc::new(StreamingClient::with_base_url(
-            &config.api_key,
-            &config.base_url,
-        ));
+        let client = Arc::new(Client::with_base_url(&config.api_key, &config.base_url));
         let context = AgentContext::new(Some(base_draft.system_prompt.clone()));
         let agent = Self {
             config,
@@ -311,7 +307,7 @@ impl Agent {
                 temperature: draft.model.temperature,
                 max_output_tokens: draft.model.max_output_tokens,
                 reasoning: draft.model.reasoning.clone(),
-                stream: Some(true),
+                stream: Some(false),
                 ..Default::default()
             };
             let transformed = self
@@ -331,49 +327,49 @@ impl Agent {
             }
             let request: CreateResponseBody = serde_json::from_value(transformed.payload)?;
 
-            let mut stream = self
+            let response = self
                 .client
-                .stream_response(request)
+                .create_response(request)
                 .await
                 .map_err(AgentError::from)?;
+
+            self.extension_manager
+                .observe(
+                    HOOK_MODEL_RESPONSE_OBSERVE,
+                    Some(iteration),
+                    serde_json::to_value(&response)?,
+                )
+                .await?;
+
+            if let Some(err) = response.error {
+                return Err(AgentError::ResponseFailed(err.message));
+            }
+            if response.status == ResponseStatus::Failed {
+                return Err(AgentError::ResponseFailed(
+                    "response status is failed".into(),
+                ));
+            }
+
+            let response_items = response.output;
             let mut text = String::new();
-            let mut response_items = Vec::new();
-            while let Some(event_result) = stream.next().await {
-                let event = event_result.map_err(AgentError::from)?;
-                let observed = match &event {
-                    StreamingEvent::OutputTextDelta { delta, .. } => {
-                        serde_json::json!({"type":"text_delta", "delta":delta})
+            for item in &response_items {
+                if let Item::Message { content, .. } = item {
+                    for part in content {
+                        match part {
+                            MessageContent::OutputText {
+                                text: part_text, ..
+                            }
+                            | MessageContent::PlainText { text: part_text } => {
+                                text.push_str(part_text);
+                            }
+                            MessageContent::Refusal { refusal } => {
+                                text.push_str(refusal);
+                            }
+                            _ => {}
+                        }
                     }
-                    StreamingEvent::OutputItemAdded { item, .. } => {
-                        serde_json::json!({"type":"output_item_added", "item": item})
-                    }
-                    StreamingEvent::OutputItemDone { item, .. } => {
-                        serde_json::json!({"type":"output_item_done", "item": item})
-                    }
-                    StreamingEvent::Error { error, .. } => {
-                        serde_json::json!({"type":"error", "message":error.message})
-                    }
-                    _ => serde_json::json!({"type":"other"}),
-                };
-                self.extension_manager
-                    .observe(HOOK_MODEL_STREAM_OBSERVE, Some(iteration), observed)
-                    .await?;
-                match event {
-                    StreamingEvent::OutputTextDelta { delta, .. } => {
-                        text.push_str(&delta);
-                        self.event_handler
-                            .on_event(&AgentEvent::TextDelta { delta });
-                    }
-                    StreamingEvent::OutputItemDone {
-                        item: Some(item), ..
-                    } => response_items.push(item),
-                    StreamingEvent::Error { error, .. } => {
-                        return Err(AgentError::ResponseFailed(error.message))
-                    }
-                    _ => {}
                 }
             }
-            drop(stream);
 
             let transformed = self
                 .extension_manager
@@ -632,6 +628,12 @@ fn validate_model_request(value: &Value) -> Result<(), String> {
     if request.max_output_tokens.is_some_and(|value| value <= 0) {
         return Err("max_output_tokens must be positive".into());
     }
+    if request.stream == Some(true) {
+        return Err("stream must be false for non-streaming model I/O".into());
+    }
+    if request.background == Some(true) {
+        return Err("background responses are not supported by the Agent loop".into());
+    }
     Ok(())
 }
 
@@ -688,6 +690,24 @@ mod hook_validation_tests {
             ..Default::default()
         };
         assert!(validate_model_request(&serde_json::to_value(request).unwrap()).is_err());
+    }
+
+    #[test]
+    fn rejects_streaming_and_background_model_requests() {
+        for request in [
+            CreateResponseBody {
+                model: Some("test".into()),
+                stream: Some(true),
+                ..Default::default()
+            },
+            CreateResponseBody {
+                model: Some("test".into()),
+                background: Some(true),
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_model_request(&serde_json::to_value(request).unwrap()).is_err());
+        }
     }
 
     #[test]

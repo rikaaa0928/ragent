@@ -1,10 +1,10 @@
-use openresponses_rust::StreamingError;
+use openresponses_rust::ClientError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AgentError {
-    #[error("Streaming error: {0}")]
-    Streaming(Box<StreamingError>),
+    #[error("Client error: {0}")]
+    Client(Box<ClientError>),
 
     #[error("Model response failed: {0}")]
     ResponseFailed(String),
@@ -34,8 +34,8 @@ pub enum AgentError {
     HookRejected { hook: String, reason: String },
 }
 
-impl From<StreamingError> for AgentError {
-    fn from(err: StreamingError) -> Self {
-        AgentError::Streaming(Box::new(err))
+impl From<ClientError> for AgentError {
+    fn from(err: ClientError) -> Self {
+        AgentError::Client(Box::new(err))
     }
 }
