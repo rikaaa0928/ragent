@@ -16,7 +16,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
 
-const DEFAULT_SYSTEM_PROMPT: &str = "你是一个高效、精准的 AI 智能体助手";
+const DEFAULT_SYSTEM_PROMPT: &str = "你是一个高效、精准、善于深度思考的 AI 智能体助手";
 
 /// 只负责模型 I/O、上下文提交与 ReAct loop；其余行为由 WASM hook 提供。
 pub struct Agent {
