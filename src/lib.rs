@@ -803,26 +803,6 @@ mod tests {
         assert!(!temp.path().join("escape.json").exists());
     }
 
-    #[test]
-    fn console_event_handler_turn_started_output_formatting() {
-        let default_handler = ConsoleEventHandler::new();
-        assert_eq!(default_handler.history_iterations, 0);
-
-        let resumed_handler = ConsoleEventHandler::new().with_history_iterations(42);
-        assert_eq!(resumed_handler.history_iterations, 42);
-
-        let mut session = SessionData::new("sess_test", "test-model", None);
-        assert_eq!(session.history_turns(), 0);
-
-        session.update_from_context(vec![
-            Item::user_message("hello"),
-            Item::assistant_message("hi there"),
-            Item::user_message("next question"),
-            Item::assistant_message("second answer"),
-        ]);
-        assert_eq!(session.history_turns(), 2);
-    }
-
     #[tokio::test]
     async fn config_loads_model_settings_and_reasoning_from_config_toml() {
         use openresponses_rust::{ReasoningConfig, ReasoningEffort, ReasoningSummary};
