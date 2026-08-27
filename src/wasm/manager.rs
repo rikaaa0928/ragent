@@ -28,6 +28,8 @@ fn default_enabled() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExtensionsConfig {
     #[serde(default)]
+    pub model: Option<crate::config::ModelSettings>,
+    #[serde(default)]
     pub extensions: Vec<ExtensionConfigItem>,
 }
 
@@ -41,6 +43,7 @@ pub struct ExtensionManager {
     plugins: Vec<Arc<WasmPlugin>>,
     plugin_config: HashMap<String, Value>,
     config_dir: PathBuf,
+    model_settings: Option<crate::config::ModelSettings>,
     invocation_id: AtomicU64,
     tool_id: AtomicU64,
 }
@@ -83,6 +86,7 @@ impl ExtensionManager {
         };
 
         let mut manager = Self::empty_at(config_dir.to_path_buf());
+        manager.model_settings = config.model;
         for item in config.extensions.into_iter().filter(|item| item.enabled) {
             let path = if Path::new(&item.path).is_absolute() {
                 PathBuf::from(&item.path)
@@ -106,6 +110,7 @@ impl ExtensionManager {
             plugins: vec![],
             plugin_config: HashMap::new(),
             config_dir,
+            model_settings: None,
             invocation_id: AtomicU64::new(1),
             tool_id: AtomicU64::new(1),
         }
@@ -134,6 +139,9 @@ impl ExtensionManager {
     }
     pub fn plugins(&self) -> &[Arc<WasmPlugin>] {
         &self.plugins
+    }
+    pub fn model_settings(&self) -> Option<&crate::config::ModelSettings> {
+        self.model_settings.as_ref()
     }
     pub fn config_dir(&self) -> &Path {
         &self.config_dir

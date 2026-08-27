@@ -84,18 +84,34 @@ The install/update script follows `XDG_CONFIG_HOME` when set, otherwise it uses
 
 ## Configuration
 
-Configure the model connection with environment variables:
+### Environment Variables
+
+Configure the API connection with environment variables:
 
 ```sh
 export ROSETTA_URL="https://example.com/v1"
 export ROSETTA_TOKEN="your-token"
-export MODEL_NAME="your-model"
 ```
 
-Extensions are loaded from `~/.config/ragent/config.toml`. The installation
-script creates the following configuration:
+> Note: Only `ROSETTA_URL` and `ROSETTA_TOKEN` are supported from environment variables. Model parameters and reasoning options are configured via `config.toml`.
+
+### Configuration File (`~/.config/ragent/config.toml`)
+
+`config.toml` configures model parameters (including reasoning / thinking effort) and manages extensions.
+
+Example configuration:
 
 ```toml
+[model]
+name = "gemini-3.7-flash"
+temperature = 0.7
+max_output_tokens = 8192
+
+# Reasoning / Thinking configuration (optional)
+[model.reasoning]
+effort = "high"      # none | low | medium | high | xhigh
+summary = "concise"  # auto | concise | detailed
+
 [[extensions]]
 name = "shell"
 path = "extensions/shell.wasm"
@@ -115,7 +131,7 @@ path = "extensions/image_viewer.wasm"
 enabled = true
 ```
 
-The configuration file currently only discovers extensions and supplies their initialization configuration. Relative paths are resolved from `~/.config/ragent/`.
+Relative paths for extensions are resolved from `~/.config/ragent/`.
 The Shell timeout defaults to 1,800 seconds (30 minutes) when omitted. Set it to
 `0` to disable the timeout. Each Shell tool call may override it with the optional
 `timeout_seconds` argument; `0` also disables the timeout for that call.

@@ -96,6 +96,19 @@ pub struct ModelDraft {
     pub name: String,
     pub temperature: Option<f64>,
     pub max_output_tokens: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<openresponses_rust::ReasoningConfig>,
+}
+
+impl ModelDraft {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            temperature: None,
+            max_output_tokens: None,
+            reasoning: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

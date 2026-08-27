@@ -79,7 +79,9 @@ pub fn print_help(program: &str) {
     println!("环境变量说明:");
     println!("  ROSETTA_URL        API Base URL (必须)");
     println!("  ROSETTA_TOKEN      API Key / Token (必须)");
-    println!("  MODEL_NAME         模型名称 (可选，默认 gemini-3.7-flash)");
+    println!();
+    println!("模型与思考参数配置:");
+    println!("  在 ~/.config/ragent/config.toml 中通过 [model] 块进行配置 (如 name, temperature, reasoning 等)");
 }
 
 /// 解析命令行参数

@@ -43,12 +43,22 @@ impl Agent {
         manager.validate_subscriptions()?;
         manager.initialize().await?;
 
+        if let Some(model_settings) = manager.model_settings() {
+            config.apply_model_settings(model_settings);
+        }
+        if config.model.trim().is_empty() {
+            return Err(AgentError::ToolError(
+                "model name is not configured. Please specify [model] name in config.toml".into(),
+            ));
+        }
+
         let draft = AgentDraft {
             system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
             model: ModelDraft {
                 name: config.model.clone(),
                 temperature: config.temperature,
                 max_output_tokens: config.max_output_tokens,
+                reasoning: config.reasoning.clone(),
             },
             tools: vec![],
             context: None,
@@ -65,6 +75,7 @@ impl Agent {
         config.model = base_draft.model.name.clone();
         config.temperature = base_draft.model.temperature;
         config.max_output_tokens = base_draft.model.max_output_tokens;
+        config.reasoning = base_draft.model.reasoning.clone();
 
         let client = Arc::new(StreamingClient::with_base_url(
             &config.api_key,
@@ -299,6 +310,7 @@ impl Agent {
                 tool_choice: (!active_tools.is_empty()).then_some(ToolChoiceParam::default()),
                 temperature: draft.model.temperature,
                 max_output_tokens: draft.model.max_output_tokens,
+                reasoning: draft.model.reasoning.clone(),
                 stream: Some(true),
                 ..Default::default()
             };

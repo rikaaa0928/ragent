@@ -123,11 +123,7 @@ mod tests {
                 None,
                 AgentDraft {
                     system_prompt: "test".into(),
-                    model: ModelDraft {
-                        name: "test".into(),
-                        temperature: None,
-                        max_output_tokens: None,
-                    },
+                    model: ModelDraft::new("test"),
                     tools: vec![],
                     context: None,
                 },
@@ -243,11 +239,7 @@ mod tests {
                 None,
                 AgentDraft {
                     system_prompt: "test".into(),
-                    model: ModelDraft {
-                        name: "test".into(),
-                        temperature: None,
-                        max_output_tokens: None,
-                    },
+                    model: ModelDraft::new("test"),
                     tools: vec![],
                     context: None,
                 },
@@ -294,11 +286,7 @@ mod tests {
                 None,
                 AgentDraft {
                     system_prompt: "test".into(),
-                    model: ModelDraft {
-                        name: "test".into(),
-                        temperature: None,
-                        max_output_tokens: None,
-                    },
+                    model: ModelDraft::new("test"),
                     tools: vec![],
                     context: None,
                 },
@@ -524,11 +512,7 @@ mod tests {
                 None,
                 AgentDraft {
                     system_prompt: "test".into(),
-                    model: ModelDraft {
-                        name: "test".into(),
-                        temperature: None,
-                        max_output_tokens: None,
-                    },
+                    model: ModelDraft::new("test"),
                     tools: vec![],
                     context: None,
                 },
@@ -743,11 +727,7 @@ mod tests {
                 None,
                 AgentDraft {
                     system_prompt: "test".into(),
-                    model: ModelDraft {
-                        name: "test".into(),
-                        temperature: None,
-                        max_output_tokens: None,
-                    },
+                    model: ModelDraft::new("test"),
                     tools: vec![],
                     context: None,
                 },
@@ -817,5 +797,54 @@ mod tests {
             Err(AgentError::InvalidSessionId(_))
         ));
         assert!(!temp.path().join("escape.json").exists());
+    }
+
+    #[tokio::test]
+    async fn config_loads_model_settings_and_reasoning_from_config_toml() {
+        use openresponses_rust::{ReasoningConfig, ReasoningEffort, ReasoningSummary};
+
+        let temp = tempfile::tempdir().unwrap();
+        let config_toml = r#"
+[model]
+name = "gemini-2.5-pro"
+temperature = 0.4
+max_output_tokens = 4096
+
+[model.reasoning]
+effort = "high"
+summary = "concise"
+
+[[extensions]]
+name = "shell"
+path = "extensions/shell.wasm"
+enabled = false
+"#;
+        std::fs::write(temp.path().join("config.toml"), config_toml).unwrap();
+
+        let manager = ExtensionManager::load_from_dir(temp.path()).await.unwrap();
+        assert!(manager.model_settings().is_some());
+
+        let settings = manager.model_settings().unwrap();
+        assert_eq!(settings.name.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(settings.temperature, Some(0.4));
+        assert_eq!(settings.max_output_tokens, Some(4096));
+
+        let reasoning = settings.reasoning.as_ref().unwrap();
+        assert_eq!(reasoning.effort, Some(ReasoningEffort::High));
+        assert_eq!(reasoning.summary, Some(ReasoningSummary::Concise));
+
+        let mut config = AgentConfig::new("https://example.com", "fake_key", "default-model");
+        config.apply_model_settings(settings);
+
+        assert_eq!(config.model, "gemini-2.5-pro");
+        assert_eq!(config.temperature, Some(0.4));
+        assert_eq!(config.max_output_tokens, Some(4096));
+        assert_eq!(
+            config.reasoning,
+            Some(ReasoningConfig {
+                effort: Some(ReasoningEffort::High),
+                summary: Some(ReasoningSummary::Concise),
+            })
+        );
     }
 }

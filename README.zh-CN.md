@@ -84,17 +84,34 @@ extensions/image_viewer/target/wasm32-wasip2/release/ragent_image_viewer_extensi
 
 ## 配置
 
-模型连接通过环境变量提供：
+### 环境变量
+
+API 连接信息通过环境变量提供：
 
 ```sh
 export ROSETTA_URL="https://example.com/v1"
 export ROSETTA_TOKEN="your-token"
-export MODEL_NAME="your-model"
 ```
 
-扩展通过 `~/.config/ragent/config.toml` 加载。首次安装时，安装脚本会创建以下配置：
+> 说明：环境变量仅保留 `ROSETTA_URL` 与 `ROSETTA_TOKEN` 两项必要连接配置，模型与思考相关参数统一通过 `config.toml` 进行管理。
+
+### 配置文件 (`~/.config/ragent/config.toml`)
+
+`config.toml` 用于配置模型参数（包括推理/思考强度等）以及加载 WASM 扩展。
+
+完整配置示例：
 
 ```toml
+[model]
+name = "gemini-3.7-flash"
+temperature = 0.7
+max_output_tokens = 8192
+
+# 思考/推理配置（可选）
+[model.reasoning]
+effort = "high"      # 可选: none | low | medium | high | xhigh
+summary = "concise"  # 可选: auto | concise | detailed
+
 [[extensions]]
 name = "shell"
 path = "extensions/shell.wasm"
@@ -114,7 +131,7 @@ path = "extensions/image_viewer.wasm"
 enabled = true
 ```
 
-配置文件当前只负责发现扩展和传递扩展初始化配置。相对路径以 `~/.config/ragent/` 为基准。
+相对路径以 `~/.config/ragent/` 为基准。
 Shell 未配置时默认超时 1800 秒（30 分钟）；配置为 `0` 可禁用超时。每次
 Shell 工具调用还可以通过可选参数 `timeout_seconds` 覆盖，单次传 `0` 同样表示禁用。
 
