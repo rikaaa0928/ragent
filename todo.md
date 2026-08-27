@@ -22,3 +22,4 @@
   - [ ] 新session启动时自动添加 session_tmp 目录的文件读写和命令执行目录的白名单。需要先解析已有配置，再添加session配置后写入到session的meta中
 - [ ] skill支持
 - [ ] 自动compact支持,用户配置一个压缩上限，上下文token数超过这个长度就进行上下文compact，完成后新启动一个session
+- [ ] session title生成
