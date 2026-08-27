@@ -95,6 +95,17 @@ impl SessionData {
         }
     }
 
+    /// 计算会话历史中已完成的模型响应轮次
+    pub fn history_turns(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| match item {
+                Item::Message { role, .. } => format!("{role:?}").eq_ignore_ascii_case("assistant"),
+                _ => false,
+            })
+            .count()
+    }
+
     /// 查找首条用户输入文本
     fn find_first_user_message(&self) -> Option<String> {
         for item in &self.items {

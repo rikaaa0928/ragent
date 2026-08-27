@@ -42,13 +42,20 @@ pub trait EventHandler: Send + Sync {
 /// 默认的控制台事件处理器（人类可读文本格式）
 pub struct ConsoleEventHandler {
     pub show_tool_output: bool,
+    pub history_iterations: usize,
 }
 
 impl ConsoleEventHandler {
     pub fn new() -> Self {
         Self {
             show_tool_output: true,
+            history_iterations: 0,
         }
+    }
+
+    pub fn with_history_iterations(mut self, history_iterations: usize) -> Self {
+        self.history_iterations = history_iterations;
+        self
     }
 }
 
@@ -73,7 +80,15 @@ impl EventHandler for ConsoleEventHandler {
                 println!("\n>>> 收到 {}: {}", tag, content);
             }
             AgentEvent::TurnStarted { iteration } => {
-                println!("\n--- [Agent 轮次 {}] 模型思考/回复中 ---", iteration);
+                if self.history_iterations > 0 {
+                    let total = self.history_iterations + iteration;
+                    println!(
+                        "\n--- [Agent 轮次 {} ({}+{})] 模型思考/回复中 ---",
+                        total, self.history_iterations, iteration
+                    );
+                } else {
+                    println!("\n--- [Agent 轮次 {}] 模型思考/回复中 ---", iteration);
+                }
             }
             AgentEvent::TurnCompleted { text, .. } => {
                 if !text.is_empty() {

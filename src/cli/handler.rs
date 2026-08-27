@@ -123,7 +123,9 @@ impl CliHandler {
             }
         };
 
-        let event_handler = Arc::new(ConsoleEventHandler::new());
+        let history_turns = session_data.history_turns();
+        let event_handler =
+            Arc::new(ConsoleEventHandler::new().with_history_iterations(history_turns));
 
         let (mut agent, sender) =
             AgentBuilder::from_session(session_data.clone(), self.config.clone()).await?;
