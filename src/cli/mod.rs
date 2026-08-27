@@ -80,8 +80,11 @@ pub fn print_help(program: &str) {
     println!("  ROSETTA_URL        API Base URL (必须)");
     println!("  ROSETTA_TOKEN      API Key / Token (必须)");
     println!();
-    println!("模型与思考参数配置:");
-    println!("  在 ~/.config/ragent/config.toml 中通过 [model] 块进行配置 (如 name, temperature, reasoning 等)");
+    println!("配置文件与优先级:");
+    println!("  全局配置: ~/.config/ragent/config.toml");
+    println!("  项目配置: 当前工作目录下的 .ragent/config.toml (按叶子节点 key 覆盖全局配置)");
+    println!("  - 模型与思考参数: 通过 [model] 块配置 (如 name, temperature, reasoning 等)");
+    println!("  - 项目扩展限制: 仅允许配置 name, enabled, config，不允许新增全局未声明扩展");
 }
 
 /// 解析命令行参数

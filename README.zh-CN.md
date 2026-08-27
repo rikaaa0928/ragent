@@ -95,9 +95,9 @@ export ROSETTA_TOKEN="your-token"
 
 > 说明：环境变量仅保留 `ROSETTA_URL` 与 `ROSETTA_TOKEN` 两项必要连接配置，模型与思考相关参数统一通过 `config.toml` 进行管理。
 
-### 配置文件 (`~/.config/ragent/config.toml`)
+### 全局配置文件 (`~/.config/ragent/config.toml`)
 
-`config.toml` 用于配置模型参数（包括推理/思考强度等）以及加载 WASM 扩展。
+`config.toml` 用于配置全局模型参数（包括推理/思考强度等）以及加载 WASM 扩展。
 
 完整配置示例：
 
@@ -134,6 +134,36 @@ enabled = true
 相对路径以 `~/.config/ragent/` 为基准。
 Shell 未配置时默认超时 1800 秒（30 分钟）；配置为 `0` 可禁用超时。每次
 Shell 工具调用还可以通过可选参数 `timeout_seconds` 覆盖，单次传 `0` 同样表示禁用。
+
+### 项目级配置文件 (`.ragent/config.toml`)
+
+当前工作目录下可放置 `.ragent/config.toml` 作为针对当前项目的增量配置：
+
+- **合并规则**：按最子节点 key（叶子节点）递归覆盖全局配置中的值；未指定的配置项自动以全局配置作为 fallback。
+- **扩展列表限制**：
+  - 项目配置中对扩展列表仅允许包含 `name`、`enabled` 和 `config` 字段（禁止出现 `path` 等其他字段）。
+  - 不允许出现全局配置中不存在的 `name`。
+  - 扩展的加载顺序严格沿用全局配置中的顺序，不受项目配置中声明顺序影响。
+  - 全局配置和项目配置中均不允许出现重名扩展。
+
+项目配置示例：
+
+```toml
+[model]
+temperature = 0.2
+
+[model.reasoning]
+effort = "medium"
+
+[[extensions]]
+name = "file_editor"
+enabled = false
+
+[[extensions]]
+name = "shell"
+[extensions.config]
+default_timeout_seconds = 300
+```
 
 ## 使用
 

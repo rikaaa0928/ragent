@@ -95,9 +95,9 @@ export ROSETTA_TOKEN="your-token"
 
 > Note: Only `ROSETTA_URL` and `ROSETTA_TOKEN` are supported from environment variables. Model parameters and reasoning options are configured via `config.toml`.
 
-### Configuration File (`~/.config/ragent/config.toml`)
+### Global Configuration File (`~/.config/ragent/config.toml`)
 
-`config.toml` configures model parameters (including reasoning / thinking effort) and manages extensions.
+`config.toml` configures global model parameters (including reasoning / thinking effort) and manages extensions.
 
 Example configuration:
 
@@ -135,6 +135,36 @@ Relative paths for extensions are resolved from `~/.config/ragent/`.
 The Shell timeout defaults to 1,800 seconds (30 minutes) when omitted. Set it to
 `0` to disable the timeout. Each Shell tool call may override it with the optional
 `timeout_seconds` argument; `0` also disables the timeout for that call.
+
+### Project Configuration File (`.ragent/config.toml`)
+
+A project-specific incremental configuration can be placed at `.ragent/config.toml` in the current working directory:
+
+- **Merging Rules**: Sub-node keys (leaf keys) recursively override values from the global configuration; unconfigured keys fall back to global settings.
+- **Extension Restrictions**:
+  - Only `name`, `enabled`, and `config` fields are permitted in project extension entries (extra fields such as `path` are rejected).
+  - Extension `name`s not present in global configuration are not allowed.
+  - Extension execution order strictly follows the global configuration and is not affected by the ordering in project config.
+  - Duplicate extension names are disallowed in both global and project configurations.
+
+Project configuration example:
+
+```toml
+[model]
+temperature = 0.2
+
+[model.reasoning]
+effort = "medium"
+
+[[extensions]]
+name = "file_editor"
+enabled = false
+
+[[extensions]]
+name = "shell"
+[extensions.config]
+default_timeout_seconds = 300
+```
 
 ## Usage
 

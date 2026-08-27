@@ -33,6 +33,22 @@ pub struct ExtensionsConfig {
     pub extensions: Vec<ExtensionConfigItem>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectExtensionConfigItem {
+    pub name: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub config: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ProjectConfigRaw {
+    #[serde(default)]
+    pub extensions: Option<Vec<ProjectExtensionConfigItem>>,
+}
+
 #[derive(Clone)]
 struct Subscriber {
     plugin: Arc<WasmPlugin>,
@@ -64,30 +80,148 @@ impl ExtensionManager {
         }
     }
 
+    pub fn get_project_config_path() -> PathBuf {
+        PathBuf::from(".ragent/config.toml")
+    }
+
     pub async fn load_from_default_config() -> Result<Self, AgentError> {
-        Self::load_from_dir(&Self::get_config_dir()).await
+        Self::load_with_project_config(&Self::get_config_dir(), &Self::get_project_config_path())
+            .await
     }
 
     pub async fn load_from_dir(config_dir: &Path) -> Result<Self, AgentError> {
+        Self::load_with_project_config(config_dir, &Self::get_project_config_path()).await
+    }
+
+    pub async fn load_with_project_config(
+        config_dir: &Path,
+        project_config_path: &Path,
+    ) -> Result<Self, AgentError> {
         if !config_dir.exists() {
             fs::create_dir_all(config_dir.join("extensions")).map_err(|e| {
                 AgentError::ToolError(format!("failed to create extension config dir: {e}"))
             })?;
         }
-        let file = config_dir.join("config.toml");
-        let config = if file.exists() {
-            toml::from_str::<ExtensionsConfig>(
-                &fs::read_to_string(&file)
-                    .map_err(|e| AgentError::ToolError(format!("failed to read {file:?}: {e}")))?,
-            )
-            .map_err(|e| AgentError::ToolError(format!("failed to parse {file:?}: {e}")))?
+        let global_file = config_dir.join("config.toml");
+        let global_value = if global_file.exists() {
+            let content = fs::read_to_string(&global_file).map_err(|e| {
+                AgentError::ToolError(format!("failed to read {global_file:?}: {e}"))
+            })?;
+            toml::from_str::<toml::Value>(&content).map_err(|e| {
+                AgentError::ToolError(format!("failed to parse {global_file:?}: {e}"))
+            })?
         } else {
-            ExtensionsConfig::default()
+            toml::Value::Table(toml::map::Map::new())
         };
 
+        let mut global_config: ExtensionsConfig = global_value.clone().try_into().map_err(|e| {
+            AgentError::ToolError(format!(
+                "failed to deserialize global config {global_file:?}: {e}"
+            ))
+        })?;
+
+        // Validate unique extension names in global config
+        let mut global_names = HashSet::new();
+        for item in &global_config.extensions {
+            if !global_names.insert(item.name.clone()) {
+                return Err(AgentError::ToolError(format!(
+                    "duplicate extension name '{}' in global config",
+                    item.name
+                )));
+            }
+        }
+
+        if project_config_path.exists() {
+            let content = fs::read_to_string(project_config_path).map_err(|e| {
+                AgentError::ToolError(format!("failed to read {project_config_path:?}: {e}"))
+            })?;
+
+            // 1. Strict validation of project config extensions schema
+            let project_raw: ProjectConfigRaw = toml::from_str(&content).map_err(|e| {
+                AgentError::ToolError(format!(
+                    "invalid extension configuration in project config {project_config_path:?}: {e}"
+                ))
+            })?;
+
+            if let Some(project_exts) = project_raw.extensions {
+                let mut project_names = HashSet::new();
+                for item in &project_exts {
+                    if !project_names.insert(item.name.clone()) {
+                        return Err(AgentError::ToolError(format!(
+                            "duplicate extension name '{}' in project config {project_config_path:?}",
+                            item.name
+                        )));
+                    }
+                    if !global_names.contains(&item.name) {
+                        return Err(AgentError::ToolError(format!(
+                            "extension '{}' in project config {project_config_path:?} does not exist in global config",
+                            item.name
+                        )));
+                    }
+                }
+            }
+
+            // 2. Parse TOML value and merge non-extension keys
+            let mut project_value = toml::from_str::<toml::Value>(&content).map_err(|e| {
+                AgentError::ToolError(format!("failed to parse {project_config_path:?}: {e}"))
+            })?;
+
+            // Extract project extensions TOML value before merging
+            let project_ext_val = if let toml::Value::Table(ref mut table) = project_value {
+                table.remove("extensions")
+            } else {
+                None
+            };
+
+            let mut merged_value = global_value;
+            if let toml::Value::Table(ref mut table) = merged_value {
+                table.remove("extensions");
+            }
+            merge_toml_value(&mut merged_value, project_value);
+
+            let other_config: ExtensionsConfig = merged_value.try_into().map_err(|e| {
+                AgentError::ToolError(format!("failed to deserialize merged config: {e}"))
+            })?;
+            global_config.model = other_config.model;
+
+            // 3. Apply project extension overrides on existing global extensions
+            if let Some(toml::Value::Array(project_ext_array)) = project_ext_val {
+                for ext_toml in project_ext_array {
+                    if let toml::Value::Table(ext_table) = ext_toml {
+                        if let Some(toml::Value::String(name)) = ext_table.get("name") {
+                            if let Some(global_ext) = global_config
+                                .extensions
+                                .iter_mut()
+                                .find(|e| e.name == *name)
+                            {
+                                if let Some(toml::Value::Boolean(enabled)) =
+                                    ext_table.get("enabled")
+                                {
+                                    global_ext.enabled = *enabled;
+                                }
+                                if let Some(config_val) = ext_table.get("config") {
+                                    let json_override: Value = serde_json::to_value(config_val)
+                                        .map_err(|e| {
+                                            AgentError::ToolError(format!(
+                                                "failed to convert extension config to json: {e}"
+                                            ))
+                                        })?;
+                                    merge_json_value(&mut global_ext.config, json_override);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let mut manager = Self::empty_at(config_dir.to_path_buf());
-        manager.model_settings = config.model;
-        for item in config.extensions.into_iter().filter(|item| item.enabled) {
+        manager.model_settings = global_config.model;
+        for item in global_config
+            .extensions
+            .into_iter()
+            .filter(|item| item.enabled)
+        {
             let path = if Path::new(&item.path).is_absolute() {
                 PathBuf::from(&item.path)
             } else {
@@ -510,4 +644,38 @@ fn invalid<T>(message: impl Into<String>) -> Result<T, std::io::Error> {
         std::io::ErrorKind::InvalidData,
         message.into(),
     ))
+}
+
+fn merge_toml_value(base: &mut toml::Value, override_val: toml::Value) {
+    match (base, override_val) {
+        (toml::Value::Table(base_table), toml::Value::Table(override_table)) => {
+            for (k, v) in override_table {
+                if let Some(base_entry) = base_table.get_mut(&k) {
+                    merge_toml_value(base_entry, v);
+                } else {
+                    base_table.insert(k, v);
+                }
+            }
+        }
+        (base_slot, override_val) => {
+            *base_slot = override_val;
+        }
+    }
+}
+
+fn merge_json_value(base: &mut Value, override_val: Value) {
+    match (base, override_val) {
+        (Value::Object(base_map), Value::Object(override_map)) => {
+            for (k, v) in override_map {
+                if let Some(base_entry) = base_map.get_mut(&k) {
+                    merge_json_value(base_entry, v);
+                } else {
+                    base_map.insert(k, v);
+                }
+            }
+        }
+        (base_slot, override_val) => {
+            *base_slot = override_val;
+        }
+    }
 }
