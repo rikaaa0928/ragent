@@ -1,7 +1,7 @@
 use crate::config::AgentConfig;
 use crate::context::AgentContext;
 use crate::error::AgentError;
-use crate::event::{AgentEvent, EventHandler};
+use crate::event::{AgentEvent, EventHandler, TokenUsage};
 use crate::sender::AgentSender;
 use crate::wasm::types::*;
 use crate::wasm::ExtensionManager;
@@ -227,11 +227,18 @@ impl Agent {
         let cancellation = self.cancellation.clone();
         let result = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => Ok(String::new()),
+            _ = cancellation.cancelled() => Ok((String::new(), TokenUsage::default())),
             result = self.run_inner() => result,
         };
-        if result.is_ok() {
-            self.event_handler.on_event(&AgentEvent::AgentFinished);
+        if let Ok((_, total_usage)) = &result {
+            let usage_opt = if total_usage.total_tokens > 0 {
+                Some(total_usage.clone())
+            } else {
+                None
+            };
+            self.event_handler.on_event(&AgentEvent::AgentFinished {
+                total_usage: usage_opt,
+            });
         }
         if let Err(error) = &result {
             let _ = self
@@ -243,22 +250,23 @@ impl Agent {
                 )
                 .await;
         }
-        result
+        result.map(|(text, _)| text)
     }
 
-    async fn run_inner(&mut self) -> Result<String, AgentError> {
+    async fn run_inner(&mut self) -> Result<(String, TokenUsage), AgentError> {
         for input in std::mem::take(&mut self.pending_inputs) {
             if self.accept_input(input, false).await? == FlowControl::Stop {
-                return Ok(String::new());
+                return Ok((String::new(), TokenUsage::default()));
             }
         }
         let mut iteration = 0;
         let mut last_response_text = String::new();
+        let mut total_usage = TokenUsage::default();
 
         loop {
             while let Ok(input) = self.immediate_rx.try_recv() {
                 if self.accept_input(input, false).await? == FlowControl::Stop {
-                    return Ok(last_response_text);
+                    return Ok((last_response_text, total_usage));
                 }
             }
             if self.config.max_iterations > 0 && iteration >= self.config.max_iterations {
@@ -350,6 +358,11 @@ impl Agent {
                 ));
             }
 
+            let turn_usage = response.usage.as_ref().map(TokenUsage::from);
+            if let Some(usage) = &turn_usage {
+                total_usage += usage;
+            }
+
             let response_items = response.output;
             let mut text = String::new();
             for item in &response_items {
@@ -410,6 +423,7 @@ impl Agent {
             self.event_handler.on_event(&AgentEvent::TurnCompleted {
                 iteration,
                 text: response_text.clone(),
+                usage: turn_usage.clone(),
             });
 
             let calls = response_items
@@ -452,7 +466,11 @@ impl Agent {
             }
 
             self.event_handler
-                .on_event(&AgentEvent::RoundCompleted { iteration });
+                .on_event(&AgentEvent::RoundCompleted {
+                    iteration,
+                    usage: turn_usage,
+                    total_usage: (total_usage.total_tokens > 0).then(|| total_usage.clone()),
+                });
             let complete = self
                 .extension_manager
                 .transform_validated(
@@ -488,7 +506,7 @@ impl Agent {
                 break;
             }
         }
-        Ok(last_response_text)
+        Ok((last_response_text, total_usage))
     }
 
     async fn execute_tool_call(
