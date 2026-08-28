@@ -71,7 +71,7 @@ async fn context_summary_filtering_behavior() {
         summary: vec![MessageContent::SummaryText {
             text: "thought".into(),
         }],
-        encrypted_content: None,
+        encrypted_content: Some("enc_sig_1".into()),
     };
     let user_item = Item::user_message("hello");
 
@@ -92,8 +92,9 @@ async fn context_summary_filtering_behavior() {
         _ => unreachable!(),
     };
     assert_eq!(items_on.len(), 2);
+    assert_eq!(items_on[1], reasoning_item);
 
-    // 2. ContextSummaryMode::Off strips reasoning
+    // 2. ContextSummaryMode::Off clears summary content while preserving encrypted_content
     let config_off = AgentConfig::new("https://example.com", "k", "m")
         .with_context_summary(ContextSummaryMode::Off);
     let (mut agent_off, _) = AgentBuilder::new(config_off)
@@ -108,66 +109,33 @@ async fn context_summary_filtering_behavior() {
     let items_off: Vec<Item> = match agent_off.config().context_summary {
         ContextSummaryMode::Off => all_items
             .into_iter()
-            .filter(|item| !matches!(item, Item::Reasoning { .. }))
-            .collect(),
-        _ => unreachable!(),
-    };
-    assert_eq!(items_off.len(), 1);
-
-    // 3. ContextSummaryMode::Auto: initial session items kept, new items filtered
-    let session = ragent::SessionData {
-        meta: ragent::SessionMeta {
-            id: "sess_1".into(),
-            title: "t".into(),
-            model: "m".into(),
-            created_at: 0,
-            updated_at: 0,
-            item_count: 2,
-        },
-        system_prompt: None,
-        items: vec![user_item.clone(), reasoning_item.clone()],
-    };
-    let config_auto = AgentConfig::new("https://example.com", "k", "m")
-        .with_context_summary(ContextSummaryMode::Auto);
-    let (mut agent_auto, _) = AgentBuilder::from_session_with_manager(
-        session,
-        config_auto,
-        Some(ExtensionManager::empty()),
-    )
-    .await
-    .unwrap();
-    assert_eq!(agent_auto.initial_items_count(), 2);
-
-    // Add a newly generated reasoning item in current run
-    let new_reasoning = Item::Reasoning {
-        id: Some("rs_2".into()),
-        status: None,
-        content: None,
-        summary: vec![MessageContent::SummaryText {
-            text: "new thought".into(),
-        }],
-        encrypted_content: None,
-    };
-    agent_auto.context_mut().add_item(new_reasoning);
-
-    let all_items = agent_auto.context().to_items();
-    let initial_len = agent_auto.initial_items_count();
-    let items_auto: Vec<Item> = match agent_auto.config().context_summary {
-        ContextSummaryMode::Auto => all_items
-            .into_iter()
-            .enumerate()
-            .filter(|(idx, item)| {
-                if matches!(item, Item::Reasoning { .. }) {
-                    *idx < initial_len
-                } else {
-                    true
-                }
+            .map(|item| match item {
+                Item::Reasoning {
+                    id,
+                    status,
+                    encrypted_content,
+                    ..
+                } => Item::Reasoning {
+                    id,
+                    status,
+                    content: None,
+                    summary: vec![],
+                    encrypted_content,
+                },
+                other => other,
             })
-            .map(|(_, item)| item)
             .collect(),
         _ => unreachable!(),
     };
-    // initial reasoning item (index 1 < 2) is kept, new reasoning item (index 2 >= 2) is filtered!
-    assert_eq!(items_auto.len(), 2);
-    assert_eq!(items_auto[1], reasoning_item);
+    assert_eq!(items_off.len(), 2);
+    assert_eq!(
+        items_off[1],
+        Item::Reasoning {
+            id: Some("rs_1".into()),
+            status: None,
+            content: None,
+            summary: vec![],
+            encrypted_content: Some("enc_sig_1".into()),
+        }
+    );
 }

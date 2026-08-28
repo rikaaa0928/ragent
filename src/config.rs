@@ -7,17 +7,14 @@ use serde::{Deserialize, Serialize};
 pub enum ContextSummaryMode {
     /// 开启：始终将思考摘要包含在发送给模型的上下文历史中
     On,
-    /// 关闭（默认）：始终从发送给模型的上下文历史中剔除思考摘要（节省上下文 Token，由服务端进行签名保底/透传）
+    /// 关闭（默认）：始终从发送给模型的上下文历史中清空思考摘要文本（节省上下文 Token，同时保留签名载体）
     #[default]
     Off,
-    /// 自动：新会话内的即时多轮工具调用不传思考摘要，继续恢复的历史 Session 时传递思考摘要
-    Auto,
 }
 
 impl std::fmt::Display for ContextSummaryMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Auto => write!(f, "auto"),
             Self::On => write!(f, "on"),
             Self::Off => write!(f, "off"),
         }
@@ -33,7 +30,7 @@ pub struct ModelReasoningSettings {
     /// 思考摘要策略 (auto, concise, detailed)
     #[serde(default)]
     pub summary: Option<ReasoningSummary>,
-    /// 是否将思考摘要放入上下文 (auto, on, off，默认 off)
+    /// 是否将思考摘要放入上下文 (on, off，默认 off)
     #[serde(default)]
     pub context_summary: Option<ContextSummaryMode>,
 }
@@ -201,7 +198,7 @@ impl AgentConfig {
         self
     }
 
-    /// 设置上下文思考摘要注入策略 (auto, on, off)
+    /// 设置上下文思考摘要注入策略 (on, off)
     pub fn with_context_summary(mut self, mode: ContextSummaryMode) -> Self {
         self.context_summary = mode;
         self

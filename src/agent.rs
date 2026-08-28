@@ -29,7 +29,6 @@ pub struct Agent {
     immediate_rx: UnboundedReceiver<String>,
     delayed_rx: UnboundedReceiver<String>,
     cancellation: CancellationToken,
-    initial_items_count: usize,
 }
 
 impl Agent {
@@ -79,7 +78,6 @@ impl Agent {
 
         let client = Arc::new(Client::with_base_url(&config.api_key, &config.base_url));
         let context = AgentContext::new(Some(base_draft.system_prompt.clone()));
-        let initial_items_count = context.items().len();
         let agent = Self {
             config,
             client,
@@ -91,7 +89,6 @@ impl Agent {
             immediate_rx,
             delayed_rx,
             cancellation: cancellation.clone(),
-            initial_items_count,
         };
         Ok((
             agent,
@@ -108,12 +105,6 @@ impl Agent {
     }
     pub fn context_mut(&mut self) -> &mut AgentContext {
         &mut self.context
-    }
-    pub fn initial_items_count(&self) -> usize {
-        self.initial_items_count
-    }
-    pub fn set_initial_items_count(&mut self, count: usize) {
-        self.initial_items_count = count;
     }
     pub fn config(&self) -> &AgentConfig {
         &self.config
@@ -318,22 +309,9 @@ impl Agent {
             let all_items = self.context.to_items();
             let input_items: Vec<Item> = match self.config.context_summary {
                 crate::config::ContextSummaryMode::On => all_items,
-                crate::config::ContextSummaryMode::Off => all_items
-                    .into_iter()
-                    .filter(|item| !matches!(item, Item::Reasoning { .. }))
-                    .collect(),
-                crate::config::ContextSummaryMode::Auto => all_items
-                    .into_iter()
-                    .enumerate()
-                    .filter(|(idx, item)| {
-                        if matches!(item, Item::Reasoning { .. }) {
-                            *idx < self.initial_items_count
-                        } else {
-                            true
-                        }
-                    })
-                    .map(|(_, item)| item)
-                    .collect(),
+                crate::config::ContextSummaryMode::Off => {
+                    all_items.into_iter().map(strip_reasoning_summary).collect()
+                }
             };
             let request = CreateResponseBody {
                 input: Some(Input::Items(input_items)),
@@ -759,6 +737,24 @@ fn validate_context_commit(value: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn strip_reasoning_summary(item: Item) -> Item {
+    match item {
+        Item::Reasoning {
+            id,
+            status,
+            encrypted_content,
+            ..
+        } => Item::Reasoning {
+            id,
+            status,
+            content: None,
+            summary: vec![],
+            encrypted_content,
+        },
+        other => other,
+    }
 }
 
 #[cfg(test)]

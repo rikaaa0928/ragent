@@ -81,9 +81,7 @@ impl AgentBuilder {
         }
         let (mut agent, sender) = builder.build().await?;
         let prompt = agent.context().system_prompt().map(str::to_owned);
-        let items_len = session.items.len();
         *agent.context_mut() = crate::context::AgentContext::from_existing(session.items, prompt);
-        agent.set_initial_items_count(items_len);
         Ok((agent, sender))
     }
 
