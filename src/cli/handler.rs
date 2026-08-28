@@ -157,6 +157,7 @@ impl CliHandler {
         let shutdown_result = agent.shutdown().await;
 
         // 保存会话状态（无论 run 是否产生错误都尽可能保存历史上下文）
+        session_data.meta.model = agent.config().model.clone();
         session_data.system_prompt = agent.context().system_prompt().map(str::to_owned);
         session_data.update_from_context(agent.context().to_items());
         let save_result = self.store.save(&session_data);

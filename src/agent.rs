@@ -502,12 +502,11 @@ impl Agent {
                 }
             }
 
-            self.event_handler
-                .on_event(&AgentEvent::RoundCompleted {
-                    iteration,
-                    usage: turn_usage,
-                    total_usage: (total_usage.total_tokens > 0).then(|| total_usage.clone()),
-                });
+            self.event_handler.on_event(&AgentEvent::RoundCompleted {
+                iteration,
+                usage: turn_usage,
+                total_usage: (total_usage.total_tokens > 0).then(|| total_usage.clone()),
+            });
             let complete = self
                 .extension_manager
                 .transform_validated(

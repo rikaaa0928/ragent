@@ -27,6 +27,9 @@ pub struct AgentConfig {
     pub api_key: String,
     /// 模型名称 (如 gemini-3.7-flash, gpt-4o 等)
     pub model: String,
+    /// 显式覆盖的模型名称 (若存在，则 apply_model_settings 不会覆盖 model 字段)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
     /// 生成温度 (0.0 - 2.0, 可选)
     pub temperature: Option<f64>,
     /// 最大输出 Token 数 (可选)
@@ -49,6 +52,7 @@ impl AgentConfig {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
+            model_override: None,
             temperature: None,
             max_output_tokens: None,
             max_iterations: 0,
@@ -58,8 +62,10 @@ impl AgentConfig {
 
     /// 应用来自 `config.toml` 中 `[model]` 块的配置
     pub fn apply_model_settings(&mut self, settings: &ModelSettings) {
-        if let Some(ref name) = settings.name {
-            self.model = name.clone();
+        if self.model_override.is_none() {
+            if let Some(ref name) = settings.name {
+                self.model = name.clone();
+            }
         }
         if settings.temperature.is_some() {
             self.temperature = settings.temperature;
@@ -70,6 +76,23 @@ impl AgentConfig {
         if settings.reasoning.is_some() {
             self.reasoning = settings.reasoning.clone();
         }
+    }
+
+    /// 设置并覆盖模型名称 (优先级高于配置文件中的 [model] name)
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        let m = model.into();
+        self.model = m.clone();
+        self.model_override = Some(m);
+        self
+    }
+
+    /// 设置显式模型覆盖 (若为 None 则恢复由配置文件填充)
+    pub fn with_model_override(mut self, model: Option<String>) -> Self {
+        if let Some(ref m) = model {
+            self.model = m.clone();
+        }
+        self.model_override = model;
+        self
     }
 
     /// 从环境变量读取配置 (仅支持 ROSETTA_URL, ROSETTA_TOKEN，模型需由配置文件 [model] 块或后续配置提供)

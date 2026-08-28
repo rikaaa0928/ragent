@@ -25,6 +25,7 @@ pub enum CliCommand {
 
 pub struct ParsedCli {
     pub custom_dir: Option<PathBuf>,
+    pub custom_model: Option<String>,
     pub command: CliCommand,
 }
 
@@ -32,29 +33,33 @@ pub fn print_help(program: &str) {
     println!("ragent - 极简 LLM Agent 命令行工具\n");
     println!("用法:");
     println!(
-        "  {} \"<prompt>\" [-d <dir>]                  新建会话并执行",
+        "  {} \"<prompt>\" [-m <model>] [-d <dir>]                  新建会话并执行",
         program
     );
     println!(
-        "  {} s list [-d <dir>]                       查看历史会话列表",
+        "  {} s list [-d <dir>]                                   查看历史会话列表",
         program
     );
     println!(
-        "  {} s view <session_id> [-d <dir>]          查看指定会话的对话历史",
+        "  {} s view <session_id> [-d <dir>]                      查看指定会话的对话历史",
         program
     );
     println!(
-        "  {} s del <session_id> [-d <dir>]           删除指定会话",
+        "  {} s del <session_id> [-d <dir>]                       删除指定会话",
         program
     );
     println!(
-        "  {} s del -a [-d <dir>]                     清空所有历史会话",
+        "  {} s del -a [-d <dir>]                                 清空所有历史会话",
         program
     );
-    println!("  {} s [session_id] \"<prompt>\" [-d <dir>]   继续会话 (session_id 为空或省略则继续最近一次会话)", program);
+    println!(
+        "  {} s [session_id] \"<prompt>\" [-m <model>] [-d <dir>]   继续会话 (session_id 为空或省略则继续最近一次会话)",
+        program
+    );
     println!();
     println!("示例:");
     println!("  {} \"帮我查看当前目录下有哪些文件\"", program);
+    println!("  {} \"写一个快速排序\" -m gemini-2.5-pro", program);
     println!("  {} s list", program);
     println!("  {} s view sess_1a2b_3c4d", program);
     println!(
@@ -66,23 +71,25 @@ pub fn print_help(program: &str) {
         program
     );
     println!(
-        "  {} s sess_1a2b_3c4d \"分析这些文件的依赖关系\"   # 继续指定 ID 会话",
+        "  {} s sess_1a2b_3c4d \"分析这些文件的依赖关系\" -m gpt-4o   # 继续指定 ID 会话并覆盖模型",
         program
     );
     println!("  {} s del sess_1a2b_3c4d", program);
     println!("  {} s del -a", program);
     println!();
     println!("选项:");
-    println!("  -d, --dir <dir>    指定会话存储目录 (默认: .ragent/sessions)");
-    println!("  -h, --help         显示帮助信息");
+    println!("  -m, --model <model>  覆盖指定大模型名称 (优先级高于配置文件)");
+    println!("  -d, --dir <dir>      指定会话存储目录 (默认: .ragent/sessions)");
+    println!("  -h, --help           显示帮助信息");
     println!();
     println!("环境变量说明:");
     println!("  ROSETTA_URL        API Base URL (必须)");
     println!("  ROSETTA_TOKEN      API Key / Token (必须)");
     println!();
     println!("配置文件与优先级:");
-    println!("  全局配置: ~/.config/ragent/config.toml");
-    println!("  项目配置: 当前工作目录下的 .ragent/config.toml (按叶子节点 key 覆盖全局配置)");
+    println!("  CLI 参数:    -m / --model 指定模型名称 (最高优先级)");
+    println!("  项目配置:    当前工作目录下的 .ragent/config.toml (按叶子节点 key 覆盖全局配置)");
+    println!("  全局配置:    ~/.config/ragent/config.toml");
     println!("  - 模型与思考参数: 通过 [model] 块配置 (如 name, temperature, reasoning 等)");
     println!("  - 项目扩展限制: 仅允许配置 name, enabled, config，不允许新增全局未声明扩展");
 }
@@ -92,17 +99,20 @@ pub fn parse_cli_args(args: &[String]) -> Result<ParsedCli, String> {
     if args.len() <= 1 {
         return Ok(ParsedCli {
             custom_dir: None,
+            custom_model: None,
             command: CliCommand::Help,
         });
     }
 
     let mut custom_dir = None;
+    let mut custom_model = None;
     let mut tokens = Vec::new();
     let mut i = 1;
 
-    // 1. 提取 -d / --dir 参数
+    // 1. 提取选项参数 (-d/--dir, -m/--model, -h/--help)
     while i < args.len() {
-        if args[i] == "-d" || args[i] == "--dir" {
+        let arg = &args[i];
+        if arg == "-d" || arg == "--dir" {
             if i + 1 < args.len() {
                 custom_dir = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
@@ -110,13 +120,54 @@ pub fn parse_cli_args(args: &[String]) -> Result<ParsedCli, String> {
             } else {
                 return Err("选项 '-d' / '--dir' 需要提供目录路径参数".to_string());
             }
-        } else if args[i] == "-h" || args[i] == "--help" {
+        } else if let Some(dir_str) = arg.strip_prefix("--dir=") {
+            if dir_str.trim().is_empty() {
+                return Err("选项 '-d' / '--dir' 需要提供目录路径参数".to_string());
+            }
+            custom_dir = Some(PathBuf::from(dir_str));
+            i += 1;
+            continue;
+        } else if let Some(dir_str) = arg.strip_prefix("-d=") {
+            if dir_str.trim().is_empty() {
+                return Err("选项 '-d' / '--dir' 需要提供目录路径参数".to_string());
+            }
+            custom_dir = Some(PathBuf::from(dir_str));
+            i += 1;
+            continue;
+        } else if arg == "-m" || arg == "--model" {
+            if i + 1 < args.len() {
+                let model_str = &args[i + 1];
+                if model_str.trim().is_empty() {
+                    return Err("选项 '-m' / '--model' 模型名称不能为空".to_string());
+                }
+                custom_model = Some(model_str.clone());
+                i += 2;
+                continue;
+            } else {
+                return Err("选项 '-m' / '--model' 需要提供模型名称参数".to_string());
+            }
+        } else if let Some(model_str) = arg.strip_prefix("--model=") {
+            if model_str.trim().is_empty() {
+                return Err("选项 '-m' / '--model' 模型名称不能为空".to_string());
+            }
+            custom_model = Some(model_str.to_string());
+            i += 1;
+            continue;
+        } else if let Some(model_str) = arg.strip_prefix("-m=") {
+            if model_str.trim().is_empty() {
+                return Err("选项 '-m' / '--model' 模型名称不能为空".to_string());
+            }
+            custom_model = Some(model_str.to_string());
+            i += 1;
+            continue;
+        } else if arg == "-h" || arg == "--help" {
             return Ok(ParsedCli {
                 custom_dir,
+                custom_model,
                 command: CliCommand::Help,
             });
         } else {
-            tokens.push(args[i].clone());
+            tokens.push(arg.clone());
             i += 1;
         }
     }
@@ -124,6 +175,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<ParsedCli, String> {
     if tokens.is_empty() {
         return Ok(ParsedCli {
             custom_dir,
+            custom_model,
             command: CliCommand::Help,
         });
     }
@@ -134,6 +186,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<ParsedCli, String> {
             // `ragent s` 默认列出 session
             return Ok(ParsedCli {
                 custom_dir,
+                custom_model,
                 command: CliCommand::ListSessions,
             });
         }
@@ -141,6 +194,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<ParsedCli, String> {
         match tokens[1].as_str() {
             "list" | "ls" => Ok(ParsedCli {
                 custom_dir,
+                custom_model,
                 command: CliCommand::ListSessions,
             }),
             "view" | "show" => {
@@ -149,6 +203,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<ParsedCli, String> {
                 } else {
                     Ok(ParsedCli {
                         custom_dir,
+                        custom_model,
                         command: CliCommand::ViewSession {
                             session_id: tokens[2].clone(),
                         },
@@ -161,6 +216,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<ParsedCli, String> {
                 } else {
                     Ok(ParsedCli {
                         custom_dir,
+                        custom_model,
                         command: CliCommand::DeleteSession {
                             id_or_all: tokens[2].clone(),
                         },
@@ -179,11 +235,13 @@ pub fn parse_cli_args(args: &[String]) -> Result<ParsedCli, String> {
                     if prompt.is_empty() {
                         return Ok(ParsedCli {
                             custom_dir,
+                            custom_model,
                             command: CliCommand::ListSessions,
                         });
                     }
                     Ok(ParsedCli {
                         custom_dir,
+                        custom_model,
                         command: CliCommand::ResumeSession {
                             session_id: None,
                             prompt,
@@ -193,6 +251,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<ParsedCli, String> {
                     // `ragent s "<prompt>"` -> session_id 省略，继续最近一次会话
                     Ok(ParsedCli {
                         custom_dir,
+                        custom_model,
                         command: CliCommand::ResumeSession {
                             session_id: None,
                             prompt: tokens[1].clone(),
@@ -207,6 +266,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<ParsedCli, String> {
                         let prompt = tokens[2..].join(" ");
                         Ok(ParsedCli {
                             custom_dir,
+                            custom_model,
                             command: CliCommand::ResumeSession {
                                 session_id: Some(possible_id.clone()),
                                 prompt,
@@ -216,6 +276,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<ParsedCli, String> {
                         let prompt = tokens[1..].join(" ");
                         Ok(ParsedCli {
                             custom_dir,
+                            custom_model,
                             command: CliCommand::ResumeSession {
                                 session_id: None,
                                 prompt,
@@ -230,13 +291,14 @@ pub fn parse_cli_args(args: &[String]) -> Result<ParsedCli, String> {
         let prompt = tokens.join(" ");
         Ok(ParsedCli {
             custom_dir,
+            custom_model,
             command: CliCommand::RunNewSession { prompt },
         })
     }
 }
 
 /// 执行 CLI 流程入口
-pub async fn run_cli(args: &[String], config: AgentConfig) -> Result<(), AgentError> {
+pub async fn run_cli(args: &[String], mut config: AgentConfig) -> Result<(), AgentError> {
     let program = args
         .first()
         .cloned()
@@ -249,6 +311,10 @@ pub async fn run_cli(args: &[String], config: AgentConfig) -> Result<(), AgentEr
             return Ok(());
         }
     };
+
+    if let Some(ref model) = parsed.custom_model {
+        config = config.with_model(model);
+    }
 
     let handler = CliHandler::new(parsed.custom_dir, config);
 

@@ -26,6 +26,12 @@ impl AgentBuilder {
         }
     }
 
+    /// 覆盖配置中的模型名称
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.config = self.config.with_model(model);
+        self
+    }
+
     pub fn with_user_message(mut self, message: impl Into<String>) -> Self {
         self.initial_user_messages.push(message.into());
         self

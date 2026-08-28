@@ -174,6 +174,13 @@ Start a session:
 cargo run -- "List the files in the current directory"
 ```
 
+Specify / override model name:
+
+```sh
+cargo run -- "Write a quicksort implementation" -m gemini-2.5-pro
+cargo run -- -m gpt-4o "Analyze this project"
+```
+
 Use a custom session directory:
 
 ```sh
@@ -186,6 +193,7 @@ Manage sessions:
 cargo run -- s list
 cargo run -- s view sess_example
 cargo run -- s sess_example "Continue the analysis"
+cargo run -- s sess_example "Continue with another model" -m claude-3-5-sonnet
 cargo run -- s del sess_example
 ```
 

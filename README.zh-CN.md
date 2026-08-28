@@ -173,6 +173,13 @@ default_timeout_seconds = 300
 cargo run -- "查看当前目录下有哪些文件"
 ```
 
+指定/覆盖模型名称执行：
+
+```sh
+cargo run -- "写一个快速排序算法" -m gemini-2.5-pro
+cargo run -- -m gpt-4o "分析当前项目"
+```
+
 指定会话存储目录：
 
 ```sh
@@ -185,6 +192,7 @@ cargo run -- "分析这个项目" -d .ragent/sessions
 cargo run -- s list
 cargo run -- s view sess_example
 cargo run -- s sess_example "继续分析"
+cargo run -- s sess_example "换用模型继续分析" -m claude-3-5-sonnet
 cargo run -- s del sess_example
 ```
 
