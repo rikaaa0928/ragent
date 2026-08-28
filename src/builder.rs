@@ -66,9 +66,24 @@ impl AgentBuilder {
         session: SessionData,
         config: AgentConfig,
     ) -> Result<(Agent, AgentSender), AgentError> {
-        let (mut agent, sender) = Self::new(config).build().await?;
+        Self::from_session_with_manager(session, config, None).await
+    }
+
+    /// 从历史 SessionData 与指定的 ExtensionManager 构建 Agent
+    pub async fn from_session_with_manager(
+        session: SessionData,
+        config: AgentConfig,
+        extension_manager: Option<ExtensionManager>,
+    ) -> Result<(Agent, AgentSender), AgentError> {
+        let mut builder = Self::new(config);
+        if let Some(mgr) = extension_manager {
+            builder = builder.with_extension_manager(mgr);
+        }
+        let (mut agent, sender) = builder.build().await?;
         let prompt = agent.context().system_prompt().map(str::to_owned);
+        let items_len = session.items.len();
         *agent.context_mut() = crate::context::AgentContext::from_existing(session.items, prompt);
+        agent.set_initial_items_count(items_len);
         Ok((agent, sender))
     }
 

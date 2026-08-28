@@ -1,6 +1,53 @@
 use openresponses_rust::{ReasoningConfig, ReasoningEffort, ReasoningSummary};
 use serde::{Deserialize, Serialize};
 
+/// 控制是否将思考摘要（Reasoning Summary）放入发送给大模型的上下文历史中
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ContextSummaryMode {
+    /// 开启：始终将思考摘要包含在发送给模型的上下文历史中
+    On,
+    /// 关闭（默认）：始终从发送给模型的上下文历史中剔除思考摘要（节省上下文 Token，由服务端进行签名保底/透传）
+    #[default]
+    Off,
+    /// 自动：新会话内的即时多轮工具调用不传思考摘要，继续恢复的历史 Session 时传递思考摘要
+    Auto,
+}
+
+impl std::fmt::Display for ContextSummaryMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => write!(f, "auto"),
+            Self::On => write!(f, "on"),
+            Self::Off => write!(f, "off"),
+        }
+    }
+}
+
+/// 配置文件中的 `[model.reasoning]` 选项块
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ModelReasoningSettings {
+    /// 思考强度 (none, minimal, low, medium, high, xhigh)
+    #[serde(default)]
+    pub effort: Option<ReasoningEffort>,
+    /// 思考摘要策略 (auto, concise, detailed)
+    #[serde(default)]
+    pub summary: Option<ReasoningSummary>,
+    /// 是否将思考摘要放入上下文 (auto, on, off，默认 off)
+    #[serde(default)]
+    pub context_summary: Option<ContextSummaryMode>,
+}
+
+impl From<ReasoningConfig> for ModelReasoningSettings {
+    fn from(c: ReasoningConfig) -> Self {
+        Self {
+            effort: c.effort,
+            summary: c.summary,
+            context_summary: None,
+        }
+    }
+}
+
 /// 配置文件中的 `[model]` 选项块
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ModelSettings {
@@ -13,9 +60,9 @@ pub struct ModelSettings {
     /// 最大输出 Token 数 (可选)
     #[serde(default)]
     pub max_output_tokens: Option<i32>,
-    /// 思考/推理配置 (可选，包含 effort 与 summary)
+    /// 思考/推理配置 (可选，包含 effort, summary 与 context_summary)
     #[serde(default)]
-    pub reasoning: Option<ReasoningConfig>,
+    pub reasoning: Option<ModelReasoningSettings>,
 }
 
 /// Agent 运行与连接配置
@@ -39,6 +86,9 @@ pub struct AgentConfig {
     /// 思考/推理配置 (默认 None)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningConfig>,
+    /// 上下文思考摘要注入策略 (默认 Off)
+    #[serde(default)]
+    pub context_summary: ContextSummaryMode,
 }
 
 impl AgentConfig {
@@ -57,6 +107,7 @@ impl AgentConfig {
             max_output_tokens: None,
             max_iterations: 0,
             reasoning: None,
+            context_summary: ContextSummaryMode::default(),
         }
     }
 
@@ -73,8 +124,16 @@ impl AgentConfig {
         if settings.max_output_tokens.is_some() {
             self.max_output_tokens = settings.max_output_tokens;
         }
-        if settings.reasoning.is_some() {
-            self.reasoning = settings.reasoning.clone();
+        if let Some(ref reasoning) = settings.reasoning {
+            if reasoning.effort.is_some() || reasoning.summary.is_some() {
+                self.reasoning = Some(ReasoningConfig {
+                    effort: reasoning.effort.clone(),
+                    summary: reasoning.summary.clone(),
+                });
+            }
+            if let Some(mode) = reasoning.context_summary {
+                self.context_summary = mode;
+            }
         }
     }
 
@@ -139,6 +198,12 @@ impl AgentConfig {
         let mut r = self.reasoning.unwrap_or_default();
         r.summary = Some(summary);
         self.reasoning = Some(r);
+        self
+    }
+
+    /// 设置上下文思考摘要注入策略 (auto, on, off)
+    pub fn with_context_summary(mut self, mode: ContextSummaryMode) -> Self {
+        self.context_summary = mode;
         self
     }
 }

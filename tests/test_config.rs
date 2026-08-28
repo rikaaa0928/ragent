@@ -49,6 +49,48 @@ enabled = false
             summary: Some(ReasoningSummary::Concise),
         })
     );
+    assert_eq!(config.context_summary, ragent::ContextSummaryMode::Off);
+}
+
+#[tokio::test]
+async fn config_loads_context_summary_modes_from_config_toml() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_toml = r#"
+[model]
+name = "gemini-3.7-flash"
+
+[model.reasoning]
+effort = "high"
+summary = "detailed"
+context_summary = "off"
+"#;
+    std::fs::write(temp.path().join("config.toml"), config_toml).unwrap();
+
+    let manager = ExtensionManager::load_from_dir(temp.path()).await.unwrap();
+    let settings = manager.model_settings().unwrap();
+
+    let mut config = AgentConfig::new("https://example.com", "fake_key", "default-model");
+    config.apply_model_settings(settings);
+
+    assert_eq!(
+        config.reasoning,
+        Some(ReasoningConfig {
+            effort: Some(ReasoningEffort::High),
+            summary: Some(ReasoningSummary::Detailed),
+        })
+    );
+    assert_eq!(config.context_summary, ragent::ContextSummaryMode::Off);
+
+    // Test on
+    let config_on = r#"
+[model.reasoning]
+context_summary = "on"
+"#;
+    std::fs::write(temp.path().join("config.toml"), config_on).unwrap();
+    let manager_on = ExtensionManager::load_from_dir(temp.path()).await.unwrap();
+    let mut cfg_on = AgentConfig::new("https://example.com", "fake_key", "default-model");
+    cfg_on.apply_model_settings(manager_on.model_settings().unwrap());
+    assert_eq!(cfg_on.context_summary, ragent::ContextSummaryMode::On);
 }
 
 #[tokio::test]

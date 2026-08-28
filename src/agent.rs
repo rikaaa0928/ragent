@@ -29,6 +29,7 @@ pub struct Agent {
     immediate_rx: UnboundedReceiver<String>,
     delayed_rx: UnboundedReceiver<String>,
     cancellation: CancellationToken,
+    initial_items_count: usize,
 }
 
 impl Agent {
@@ -78,6 +79,7 @@ impl Agent {
 
         let client = Arc::new(Client::with_base_url(&config.api_key, &config.base_url));
         let context = AgentContext::new(Some(base_draft.system_prompt.clone()));
+        let initial_items_count = context.items().len();
         let agent = Self {
             config,
             client,
@@ -89,6 +91,7 @@ impl Agent {
             immediate_rx,
             delayed_rx,
             cancellation: cancellation.clone(),
+            initial_items_count,
         };
         Ok((
             agent,
@@ -105,6 +108,12 @@ impl Agent {
     }
     pub fn context_mut(&mut self) -> &mut AgentContext {
         &mut self.context
+    }
+    pub fn initial_items_count(&self) -> usize {
+        self.initial_items_count
+    }
+    pub fn set_initial_items_count(&mut self, count: usize) {
+        self.initial_items_count = count;
     }
     pub fn config(&self) -> &AgentConfig {
         &self.config
@@ -306,8 +315,28 @@ impl Agent {
                         .with_parameters(tool.definition.parameters.clone())
                 })
                 .collect::<Vec<_>>();
+            let all_items = self.context.to_items();
+            let input_items: Vec<Item> = match self.config.context_summary {
+                crate::config::ContextSummaryMode::On => all_items,
+                crate::config::ContextSummaryMode::Off => all_items
+                    .into_iter()
+                    .filter(|item| !matches!(item, Item::Reasoning { .. }))
+                    .collect(),
+                crate::config::ContextSummaryMode::Auto => all_items
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(idx, item)| {
+                        if matches!(item, Item::Reasoning { .. }) {
+                            *idx < self.initial_items_count
+                        } else {
+                            true
+                        }
+                    })
+                    .map(|(_, item)| item)
+                    .collect(),
+            };
             let request = CreateResponseBody {
-                input: Some(Input::Items(self.context.to_items())),
+                input: Some(Input::Items(input_items)),
                 model: Some(draft.model.name.clone()),
                 instructions: Some(draft.system_prompt.clone()),
                 tools: (!request_tools.is_empty()).then_some(request_tools),

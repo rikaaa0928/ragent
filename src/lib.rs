@@ -11,7 +11,7 @@ pub mod wasm;
 
 pub use agent::Agent;
 pub use builder::AgentBuilder;
-pub use config::AgentConfig;
+pub use config::{AgentConfig, ContextSummaryMode, ModelReasoningSettings, ModelSettings};
 pub use context::AgentContext;
 pub use error::AgentError;
 pub use event::{
