@@ -365,22 +365,58 @@ impl Agent {
 
             let response_items = response.output;
             let mut text = String::new();
+            let mut reasoning_text = String::new();
             for item in &response_items {
-                if let Item::Message { content, .. } = item {
-                    for part in content {
-                        match part {
-                            MessageContent::OutputText {
-                                text: part_text, ..
+                match item {
+                    Item::Message { content, .. } => {
+                        for part in content {
+                            match part {
+                                MessageContent::OutputText {
+                                    text: part_text, ..
+                                }
+                                | MessageContent::PlainText { text: part_text } => {
+                                    text.push_str(part_text);
+                                }
+                                MessageContent::Refusal { refusal } => {
+                                    text.push_str(refusal);
+                                }
+                                _ => {}
                             }
-                            | MessageContent::PlainText { text: part_text } => {
-                                text.push_str(part_text);
-                            }
-                            MessageContent::Refusal { refusal } => {
-                                text.push_str(refusal);
-                            }
-                            _ => {}
                         }
                     }
+                    Item::Reasoning {
+                        summary, content, ..
+                    } => {
+                        for part in summary {
+                            match part {
+                                MessageContent::SummaryText { text: part_text }
+                                | MessageContent::OutputText {
+                                    text: part_text, ..
+                                }
+                                | MessageContent::PlainText { text: part_text } => {
+                                    reasoning_text.push_str(part_text);
+                                }
+                                _ => {}
+                            }
+                        }
+                        if reasoning_text.is_empty() {
+                            if let Some(content_parts) = content {
+                                for part in content_parts {
+                                    match part {
+                                        MessageContent::SummaryText { text: part_text }
+                                        | MessageContent::OutputText {
+                                            text: part_text, ..
+                                        }
+                                        | MessageContent::PlainText { text: part_text } => {
+                                            reasoning_text.push_str(part_text);
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
 
@@ -423,6 +459,7 @@ impl Agent {
             self.event_handler.on_event(&AgentEvent::TurnCompleted {
                 iteration,
                 text: response_text.clone(),
+                reasoning: (!reasoning_text.is_empty()).then_some(reasoning_text),
                 usage: turn_usage.clone(),
             });
 

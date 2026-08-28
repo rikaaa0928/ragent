@@ -769,6 +769,7 @@ mod tests {
             &AgentEvent::TurnCompleted {
                 iteration: 1,
                 text: "hi".into(),
+                reasoning: None,
                 usage: Some(TokenUsage::new(100, 50, 150, 20, 10)),
             },
         );
@@ -778,6 +779,22 @@ mod tests {
         assert_eq!(parsed["usage"]["total_tokens"], 150);
         assert_eq!(parsed["usage"]["cached_tokens"], 20);
         assert_eq!(parsed["usage"]["reasoning_tokens"], 10);
+    }
+
+    #[test]
+    fn test_reasoning_deserialization() {
+        let json_str = r#"{
+            "type": "reasoning",
+            "id": "rs_123",
+            "summary": [
+                {
+                    "type": "summary_text",
+                    "text": "Hello thinking"
+                }
+            ]
+        }"#;
+        let item: Item = serde_json::from_str(json_str).unwrap();
+        println!("Deserialized Item: {:?}", item);
     }
 
     #[test]

@@ -96,6 +96,8 @@ pub enum AgentEvent {
         iteration: usize,
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<TokenUsage>,
     },
     /// 开始调用工具
@@ -170,7 +172,18 @@ impl EventHandler for ConsoleEventHandler {
             AgentEvent::TurnStarted { iteration } => {
                 println!("\n--- [Agent 轮次 {}] 模型思考/回复中 ---", iteration);
             }
-            AgentEvent::TurnCompleted { text, usage, .. } => {
+            AgentEvent::TurnCompleted {
+                text,
+                reasoning,
+                usage,
+                ..
+            } => {
+                if let Some(reasoning) = reasoning {
+                    let trimmed = reasoning.trim();
+                    if !trimmed.is_empty() {
+                        println!("\n--- [思考摘要] ---:\n{}\n--- [摘要结束] ---", trimmed);
+                    }
+                }
                 if !text.is_empty() {
                     println!("{}", text);
                 } else {
