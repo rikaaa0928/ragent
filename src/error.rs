@@ -24,6 +24,9 @@ pub enum AgentError {
     #[error("Invalid session id: {0}")]
     InvalidSessionId(String),
 
+    #[error("Unsupported session version: found {found:?}, expected {expected}")]
+    UnsupportedSessionVersion { found: Option<u64>, expected: u32 },
+
     #[error("JSON serialization/deserialization error: {0}")]
     JsonError(#[from] serde_json::Error),
 

@@ -11,6 +11,8 @@ use std::sync::Arc;
 /// Agent 极简构建器
 pub struct AgentBuilder {
     config: AgentConfig,
+    session_name: Option<String>,
+    basic_system_prompt: String,
     initial_user_messages: Vec<String>,
     event_handler: Option<Arc<dyn EventHandler>>,
     extension_manager: Option<ExtensionManager>,
@@ -20,6 +22,8 @@ impl AgentBuilder {
     pub fn new(config: AgentConfig) -> Self {
         Self {
             config,
+            session_name: None,
+            basic_system_prompt: crate::session::DEFAULT_SYSTEM_PROMPT.to_string(),
             initial_user_messages: Vec::new(),
             event_handler: None,
             extension_manager: None,
@@ -75,13 +79,16 @@ impl AgentBuilder {
         config: AgentConfig,
         extension_manager: Option<ExtensionManager>,
     ) -> Result<(Agent, AgentSender), AgentError> {
+        session.validate_schema_version()?;
+        session.ensure_temp_dir()?;
         let mut builder = Self::new(config);
+        builder.session_name = Some(session.meta.id.clone());
+        builder.basic_system_prompt = session.basic_system_prompt().to_string();
         if let Some(mgr) = extension_manager {
             builder = builder.with_extension_manager(mgr);
         }
         let (mut agent, sender) = builder.build().await?;
-        let prompt = agent.context().system_prompt().map(str::to_owned);
-        *agent.context_mut() = crate::context::AgentContext::from_existing(session.items, prompt);
+        *agent.context_mut() = crate::context::AgentContext::from_existing(session.items);
         Ok((agent, sender))
     }
 
@@ -92,7 +99,13 @@ impl AgentBuilder {
             None => ExtensionManager::load_from_default_config().await?,
         };
 
-        let (mut agent, sender) = Agent::new_with_manager(self.config, manager).await?;
+        let (mut agent, sender) = Agent::new_with_manager_and_basic_prompt(
+            self.config,
+            manager,
+            self.basic_system_prompt,
+            self.session_name,
+        )
+        .await?;
 
         for user_msg in self.initial_user_messages {
             agent.add_user_message(user_msg);

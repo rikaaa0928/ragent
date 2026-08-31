@@ -1,5 +1,7 @@
 use crate::error::AgentError;
-use crate::session::model::{SessionData, SessionMeta};
+use crate::session::model::{
+    validate_session_id, SessionData, SessionMeta, SESSION_SCHEMA_VERSION,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -42,20 +44,13 @@ impl SessionStore {
 
     /// 获取特定 session 的 json 文件完整路径
     pub fn session_file_path(&self, id: &str) -> Result<PathBuf, AgentError> {
-        let id = id.trim();
-        if id.is_empty()
-            || id.len() > 64
-            || !id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-        {
-            return Err(AgentError::InvalidSessionId(id.to_string()));
-        }
+        validate_session_id(id)?;
         Ok(self.base_dir.join(format!("{id}.json")))
     }
 
     /// 保存会话数据（采用 Write-to-temp + Rename 原子写入策略）
     pub fn save(&self, session: &SessionData) -> Result<(), AgentError> {
+        session.validate_schema_version()?;
         self.ensure_dir()?;
         let target_path = self.session_file_path(&session.meta.id)?;
         let temp_path = target_path.with_extension("json.tmp");
@@ -93,9 +88,7 @@ impl SessionStore {
             ))
         })?;
 
-        let session: SessionData = serde_json::from_str(&content).map_err(|e| {
-            AgentError::ToolError(format!("Corrupted session file {:?}: {}", file_path, e))
-        })?;
+        let session = Self::deserialize_session(&content, &file_path)?;
 
         Ok(Some(session))
     }
@@ -118,7 +111,7 @@ impl SessionStore {
             let path = entry.path();
             if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
                 if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(session) = serde_json::from_str::<SessionData>(&content) {
+                    if let Ok(session) = Self::deserialize_session(&content, &path) {
                         metas.push(session.meta);
                     }
                 }
@@ -181,5 +174,21 @@ impl SessionStore {
         }
 
         Ok(count)
+    }
+
+    fn deserialize_session(content: &str, path: &Path) -> Result<SessionData, AgentError> {
+        let value: serde_json::Value = serde_json::from_str(content).map_err(|error| {
+            AgentError::ToolError(format!("Corrupted session file {:?}: {}", path, error))
+        })?;
+        let found = value.get("schema_version").and_then(|value| value.as_u64());
+        if found != Some(u64::from(SESSION_SCHEMA_VERSION)) {
+            return Err(AgentError::UnsupportedSessionVersion {
+                found,
+                expected: SESSION_SCHEMA_VERSION,
+            });
+        }
+        serde_json::from_value(value).map_err(|error| {
+            AgentError::ToolError(format!("Corrupted session file {:?}: {}", path, error))
+        })
     }
 }

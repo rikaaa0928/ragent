@@ -3,8 +3,8 @@
   - [x] 项目级别配置中对扩展列表的操作只允许修改enabled和config字段，项目级别配置的扩展列表中只能出现name，enabled和config相关参数，而且不允许出现全局配置中不存在的name。扩展的顺序也沿用全局配置中的顺序，不受项目级别配置影响。全局配置和项目配置中都不允许重名扩展
 - [x] 支持每次对话的token总量和详细用量的统计和展示,包括输出，输出，缓存，思考的用量
 - [x] 支持-m/--model覆盖指定模型名
-- [ ] 每个session启动时都新建一个/tmp/ragent/${session_name}的session_tmp临时目录，用来放置那些不适合出现在workspace的文件，比如从剪切板粘贴的图片，测试代码等过渡内容
-  - [ ] session_tmp临时目录的信息和使用指南放在system prompt里
+- [x] 每个session启动时都新建一个/tmp/ragent/${session_name}的session_tmp临时目录，用来放置那些不适合出现在workspace的文件，比如从剪切板粘贴的图片，测试代码等过渡内容
+  - [x] session_tmp临时目录的信息和使用指南放在system prompt里
 - [ ] 更完善的权限管理
   - [ ] 设计实现权限管理，询问交互系统和交互方式
   - [ ] 支持文件，网络，命令执行目录，三方面权限管理

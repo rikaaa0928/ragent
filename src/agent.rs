@@ -3,6 +3,7 @@ use crate::context::AgentContext;
 use crate::error::AgentError;
 use crate::event::{AgentEvent, EventHandler, TokenUsage};
 use crate::sender::AgentSender;
+use crate::session::{session_tmp_dir, DEFAULT_SYSTEM_PROMPT};
 use crate::wasm::types::*;
 use crate::wasm::ExtensionManager;
 use openresponses_rust::{
@@ -10,31 +11,42 @@ use openresponses_rust::{
     ToolChoiceParam,
 };
 use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
-
-const DEFAULT_SYSTEM_PROMPT: &str = "你是一个高效、精准、善于深度思考的 AI 智能体助手";
 
 /// 只负责模型 I/O、上下文提交与 ReAct loop；其余行为由 WASM hook 提供。
 pub struct Agent {
     config: AgentConfig,
     client: Arc<Client>,
     context: AgentContext,
-    base_draft: AgentDraft,
+    prepared_draft: AgentDraft,
+    basic_system_prompt: String,
     extension_manager: ExtensionManager,
     event_handler: Arc<dyn EventHandler>,
     pending_inputs: Vec<String>,
     immediate_rx: UnboundedReceiver<String>,
     delayed_rx: UnboundedReceiver<String>,
     cancellation: CancellationToken,
+    session_name: Option<String>,
 }
 
 impl Agent {
     pub async fn new_with_manager(
+        config: AgentConfig,
+        manager: ExtensionManager,
+    ) -> Result<(Self, AgentSender), AgentError> {
+        Self::new_with_manager_and_basic_prompt(config, manager, DEFAULT_SYSTEM_PROMPT.into(), None)
+            .await
+    }
+
+    pub(crate) async fn new_with_manager_and_basic_prompt(
         mut config: AgentConfig,
         manager: ExtensionManager,
+        basic_system_prompt: String,
+        session_name: Option<String>,
     ) -> Result<(Self, AgentSender), AgentError> {
         let (immediate_tx, immediate_rx) = unbounded_channel();
         let (delayed_tx, delayed_rx) = unbounded_channel();
@@ -51,8 +63,9 @@ impl Agent {
             ));
         }
 
+        let system_prompt = basic_system_prompt.clone();
         let draft = AgentDraft {
-            system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
+            system_prompt,
             model: ModelDraft {
                 name: config.model.clone(),
                 temperature: config.temperature,
@@ -62,7 +75,7 @@ impl Agent {
             tools: vec![],
             context: None,
         };
-        let (base_draft, control) = manager
+        let (prepared_draft, control) = manager
             .transform_agent_draft(HOOK_AGENT_PREPARE, None, draft)
             .await?;
         if control != FlowControl::Continue {
@@ -71,24 +84,26 @@ impl Agent {
                 reason: "agent initialization was skipped or stopped".into(),
             });
         }
-        config.model = base_draft.model.name.clone();
-        config.temperature = base_draft.model.temperature;
-        config.max_output_tokens = base_draft.model.max_output_tokens;
-        config.reasoning = base_draft.model.reasoning.clone();
+        config.model = prepared_draft.model.name.clone();
+        config.temperature = prepared_draft.model.temperature;
+        config.max_output_tokens = prepared_draft.model.max_output_tokens;
+        config.reasoning = prepared_draft.model.reasoning.clone();
 
         let client = Arc::new(Client::with_base_url(&config.api_key, &config.base_url));
-        let context = AgentContext::new(Some(base_draft.system_prompt.clone()));
+        let context = AgentContext::new();
         let agent = Self {
             config,
             client,
             context,
-            base_draft,
+            prepared_draft,
+            basic_system_prompt,
             extension_manager: manager,
             event_handler: Arc::new(crate::event::ConsoleEventHandler::new()),
             pending_inputs: vec![],
             immediate_rx,
             delayed_rx,
             cancellation: cancellation.clone(),
+            session_name,
         };
         Ok((
             agent,
@@ -120,6 +135,20 @@ impl Agent {
     }
     pub fn extension_manager(&self) -> &ExtensionManager {
         &self.extension_manager
+    }
+    pub fn session_name(&self) -> Option<&str> {
+        self.session_name.as_deref()
+    }
+    pub fn session_tmp_dir(&self) -> Option<PathBuf> {
+        self.session_name.as_deref().map(session_tmp_dir)
+    }
+    /// 获取 Session 创建时由 ragent 固化的基础系统提示词。
+    pub fn basic_system_prompt(&self) -> &str {
+        &self.basic_system_prompt
+    }
+    /// 获取经过 agent.prepare 处理后的 Agent 级系统提示词。
+    pub fn prepared_system_prompt(&self) -> &str {
+        &self.prepared_draft.system_prompt
     }
 
     pub async fn shutdown(&self) -> Result<(), AgentError> {
@@ -276,7 +305,7 @@ impl Agent {
             self.event_handler
                 .on_event(&AgentEvent::TurnStarted { iteration });
 
-            let mut draft = self.base_draft.clone();
+            let mut draft = self.prepared_draft.clone();
             draft.context = Some(serde_json::json!({
                 "items": self.context.to_items(),
                 "view": self.context_view()

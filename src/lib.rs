@@ -19,7 +19,10 @@ pub use event::{
     NoopEventHandler, TokenUsage,
 };
 pub use sender::AgentSender;
-pub use session::{SessionData, SessionMeta, SessionStore};
+pub use session::{
+    build_basic_system_prompt, ensure_session_tmp_dir, session_tmp_dir, validate_session_id,
+    SessionData, SessionMeta, SessionStore, DEFAULT_SYSTEM_PROMPT, SESSION_SCHEMA_VERSION,
+};
 pub use wasm::types::*;
 pub use wasm::{ExtensionConfigItem, ExtensionManager, ExtensionsConfig, WasmPlugin};
 

@@ -105,7 +105,9 @@ impl CliHandler {
                     loaded
                 } else {
                     println!("[新建会话] 创建会话 ID: {}", id);
-                    SessionData::new(id, &self.config.model, None)
+                    let session = SessionData::new(id, &self.config.model)?;
+                    self.store.save(&session)?;
+                    session
                 }
             }
             None => {
@@ -118,7 +120,9 @@ impl CliHandler {
                 } else {
                     let new_id = SessionData::generate_id();
                     println!("[新建会话] 未找到历史会话，创建新会话: {}", new_id);
-                    SessionData::new(new_id, &self.config.model, None)
+                    let session = SessionData::new(new_id, &self.config.model)?;
+                    self.store.save(&session)?;
+                    session
                 }
             }
         };
@@ -158,7 +162,6 @@ impl CliHandler {
 
         // 保存会话状态（无论 run 是否产生错误都尽可能保存历史上下文）
         session_data.meta.model = agent.config().model.clone();
-        session_data.system_prompt = agent.context().system_prompt().map(str::to_owned);
         session_data.update_from_context(agent.context().to_items());
         let save_result = self.store.save(&session_data);
 

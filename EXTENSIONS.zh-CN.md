@@ -657,15 +657,17 @@ interface HookPayloadMap {
   -> 加载 Component / metadata
   -> 校验订阅
   -> initialize
-  -> agent.prepare
-  -> 保存 BaseAgentState
+  -> 加载 Session 中不可变的 basic_system_prompt
+     （无 Session 时使用独立 Agent 默认值）
+  -> agent.prepare(basic_system_prompt)
+  -> 仅在内存中保存 PreparedAgentState
 
 输入
   -> input.prepare
   -> context.commit(reason=input)
 
 每一轮
-  -> clone BaseAgentState + 当前完整上下文
+  -> clone PreparedAgentState + 当前完整上下文
   -> turn.prepare
   -> model.request.prepare
   -> 非流式模型 I/O
@@ -691,7 +693,11 @@ interface HookPayloadMap {
 点被丢弃，因此扩展不能假定单次调用内的清理代码一定执行完毕；持久资源清理应放在
 生命周期 `shutdown` 中。宿主命令会在被取消的 Future 丢弃时终止对应子进程。
 
-`BaseAgentState` 不会被每轮动态变更永久污染。若要永久添加工具或修改默认 Prompt，在 `agent.prepare` 修改；若要按上下文动态变化，在 `turn.prepare` 修改。
+对于 Session，ragent 只在创建时生成并持久化一次 `basic_system_prompt`。恢复时逐字
+加载，不执行任何新的核心 Prompt 处理。每次 Agent 启动时，`agent.prepare` 基于它
+生成不持久化的 `prepared_system_prompt`。每轮修改不会污染 `PreparedAgentState`；
+按上下文动态变化应使用 `turn.prepare`。加载 `basic_system_prompt` 之后的所有运行时
+Prompt 修改都由扩展负责。
 
 ## 7. Hook 点位与载荷
 

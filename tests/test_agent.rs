@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[tokio::test]
-async fn builder_and_context_do_not_duplicate_system_prompt() {
+async fn standalone_builder_prepares_default_system_prompt() {
     let config = AgentConfig::new("https://example.com", "fake_key", "test-model")
         .with_max_iterations(10)
         .with_temperature(0.5);
@@ -17,9 +17,10 @@ async fn builder_and_context_do_not_duplicate_system_prompt() {
         .unwrap();
 
     assert_eq!(
-        agent.context().system_prompt(),
-        Some("你是一个高效、精准、善于深度思考的 AI 智能体助手")
+        agent.basic_system_prompt(),
+        "你是一个高效、精准、善于深度思考的 AI 智能体助手"
     );
+    assert_eq!(agent.prepared_system_prompt(), agent.basic_system_prompt());
     assert!(agent.context().items().is_empty());
 }
 
@@ -51,12 +52,11 @@ async fn sender_cancels_agent_before_model_io() {
 
 #[test]
 fn context_keeps_complete_history() {
-    let mut context = AgentContext::from_existing(vec![Item::system_message("old system")], None);
+    let mut context = AgentContext::from_existing(vec![Item::system_message("old system")]);
     for index in 1..=6 {
         context.add_user_message(format!("message {index}"));
     }
     assert_eq!(context.items().len(), 6);
-    assert_eq!(context.system_prompt(), Some("old system"));
 }
 
 #[tokio::test]

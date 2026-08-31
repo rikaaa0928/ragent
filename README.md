@@ -209,11 +209,15 @@ progress to exit immediately with status 130.
 
 ## Default behavior
 
-- The default System Prompt is exactly: `你是一个高效、精准的 AI 智能体助手`
+- A new session freezes a `basic_system_prompt` containing the default prompt and its
+  `/tmp/ragent/<session-id>` working-directory guidance. Resuming that session loads this
+  value byte-for-byte; ragent never appends newer core guidance to it.
+- Extensions may derive a non-persisted `prepared_system_prompt` through `agent.prepare`.
 - The tool list is empty when no extension is loaded.
 - Context is never pruned automatically.
 - `max_iterations = 0` means that the loop is unlimited.
 - Session IDs may contain only letters, digits, `_`, and `-`, with a maximum length of 64 characters.
+- Session files use schema version 2. Older session files are rejected rather than migrated.
 - `AgentSender::cancel()` exposes the same cancellation path for embedded callers.
 
 ## Verification

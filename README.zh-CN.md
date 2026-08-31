@@ -207,11 +207,15 @@ shutdown 并保存会话。清理过程中再次按下会立即以状态码 130 
 
 ## 默认行为
 
-- 默认 System Prompt 只有：`你是一个高效、精准的 AI 智能体助手`
+- 新 Session 会固化一份 `basic_system_prompt`，其中包含默认提示词以及
+  `/tmp/ragent/<session-id>` 工作目录指南。恢复 Session 时逐字加载该值，ragent
+  不会向其中追加后续版本的新指引
+- 扩展可以通过 `agent.prepare` 基于它生成不持久化的 `prepared_system_prompt`
 - 未加载扩展时工具列表为空
 - 不进行自动上下文裁剪
 - `max_iterations = 0` 表示不限制循环轮数
 - Session ID 只允许字母、数字、`_`、`-`，最大 64 个字符
+- Session 文件格式版本为 2；旧格式会被明确拒绝，不执行迁移
 - 嵌入式调用方可以通过 `AgentSender::cancel()` 走同一条取消流程
 
 ## 验证

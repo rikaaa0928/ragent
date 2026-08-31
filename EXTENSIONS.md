@@ -657,15 +657,17 @@ read ~/.config/ragent/config.toml
   -> load Components / metadata
   -> validate subscriptions
   -> initialize
-  -> agent.prepare
-  -> save BaseAgentState
+  -> load the session's immutable basic_system_prompt
+     (or use the standalone default without a session)
+  -> agent.prepare(basic_system_prompt)
+  -> save PreparedAgentState in memory only
 
 input
   -> input.prepare
   -> context.commit(reason=input)
 
 each turn
-  -> clone BaseAgentState + complete current context
+  -> clone PreparedAgentState + complete current context
   -> turn.prepare
   -> model.request.prepare
   -> non-streaming model I/O
@@ -693,7 +695,11 @@ dropped at any await point, so extensions must not rely on per-invocation cleanu
 running to completion. Put durable cleanup in lifecycle `shutdown`. Host commands
 are configured to kill their child process when the canceled future is dropped.
 
-Per-turn changes never mutate `BaseAgentState`. Use `agent.prepare` for persistent default tools or Prompt changes. Use `turn.prepare` for context-dependent changes.
+For sessions, ragent creates and persists `basic_system_prompt` exactly once. Resuming a
+session loads it without applying any new core Prompt processing. `agent.prepare` derives the
+non-persisted `prepared_system_prompt` each time the Agent starts. Per-turn changes never mutate
+`PreparedAgentState`; use `turn.prepare` for context-dependent changes. Extensions own all
+runtime Prompt changes after `basic_system_prompt` has been loaded.
 
 ## 7. Hook points and payloads
 
