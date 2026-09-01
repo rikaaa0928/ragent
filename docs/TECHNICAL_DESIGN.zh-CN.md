@@ -9,6 +9,7 @@
 关联文档：
 
 - [产品需求文档](./PRODUCT_REQUIREMENTS.zh-CN.md)
+- [Prototype 技术设计](./TECHNICAL_DESIGN_PROTOTYPE.zh-CN.md)
 - [架构改造实施流程](./ARCHITECTURE_REWRITE_ROADMAP.zh-CN.md)
 
 ## 1. 方案摘要
@@ -35,20 +36,20 @@ CLI / TUI / WebUI
 │        └────────── Store Writer ─────────┐  │
 └──────────────────────────────────────────│──┘
                                            ▼
-                                  Directory Control Store
+                                   SQLite Control Store
                                            │
                                            └── Shared Workspace(s)
 ```
 
 Session 是持久化的最小工作台，Agent Runner 是可随时重建的执行器。所有模型上下文直接保存为 Open Responses `Item`，按不可变 Item Batch 原子追加。Session 的来源在创建时冻结为固定 Context Slice，从而支持零复制 fork、压缩和多来源派生。
 
-第一版只允许一个 ragentd 进程写 Directory Store。不同 Session 可以并行执行，但所有事实提交经过单个 Store Writer 串行落盘。
+第一版只允许一个 ragentd 进程写 SQLite Control Store。不同 Session 可以并行执行，但所有事实提交经过单个 Store Writer，并在 SQLite 事务中原子提交。
 
 ## 2. 目标与非目标
 
 ### 2.1 技术目标
 
-- 使用普通目录实现可检查、可恢复、只追加的事实存储。
+- 使用单个本地 SQLite 数据库实现可检查、可恢复、只追加的事实存储。
 - 核心上下文路径只使用 Open Responses 原生类型。
 - 保证 Item Batch 的原子提交。
 - 保证已提交上下文不可修改。
@@ -69,7 +70,7 @@ Session 是持久化的最小工作台，Agent Runner 是可随时重建的执�
 - 不实现模型 Token streaming。
 - 不提供通用工作流 DSL。
 - 不在核心中捆绑业务工具。
-- 不以数据库为第一版默认存储。
+- 不依赖外部数据库服务，不实现 SQLite 之外的第二个 Store 后端。
 
 ## 3. 架构原则与硬性不变量
 
@@ -113,11 +114,11 @@ Context Projection 只存在于一次模型请求过程中。Projection Hook 的
 
 ### INV-010 单一 Store Writer
 
-只有 ragentd 内的 Store Writer 可以创建或 rename Store 事实文件。Runner、前端和 Extension 不得直接写 Store。
+只有 ragentd 内的 Store Writer 可以开启 SQLite 写事务并提交事实。Runner、前端和 Extension 不得直接连接或写 Store。
 
 ### INV-011 状态可重建
 
-所有 `status.json` 和内存索引都是投影。删除后必须能够从 Spec、Batch 和 Event 重建。
+`session_status` 表和内存缓存都是投影。清空后必须能够从 Session Spec、Batch 和 Event 重建。
 
 ### INV-012 动态配置有历史引用
 
@@ -155,9 +156,8 @@ ragent/
 
     store/
       mod.rs
-      directory.rs
-      layout.rs
-      recovery.rs
+      sqlite.rs
+      schema.rs
       writer.rs
       projection.rs
 
@@ -543,7 +543,7 @@ Open → Closed → Archived
 - Corrupted 是恢复过程产生的保护状态，不允许继续追加事实。
 - 第一版不提供 reopen 或 unarchive；需要继续工作时创建派生 Session。
 
-`status.json` 是投影缓存，允许原子覆盖。任何字段都必须能从 Spec、Sources、Batches 和 Events 重建。
+`session_status` 是投影表，允许在事务中更新。任何字段都必须能从 Spec、Sources、Batches 和 Events 重建。
 
 ### 6.8 ConfigRevision
 
@@ -683,220 +683,186 @@ global.general
 
 最终 RuleSet 的判断顺序固定为 deny、allow、default。拒绝规则优先于允许规则。Session 层不是 SessionSpec 中的可变字段，而是从 `SessionPermissionBootstrapped` 和包含 `session_rule` 的 `PermissionResolved` Event 投影得到。
 
-## 7. Directory Store
+## 7. SQLite Control Store
 
-### 7.1 根目录布局
+### 7.1 存储布局和连接模式
 
 ```text
 <store-root>/
-  format.json
   writer.lock
-  .tmp/
-
-  configs/
-    sha256-<hex>.json
-
-  permission-snapshots/
-    sha256-<hex>.json
-
-  workspaces/
-    <workspace-id>.json
-
-  sessions/
-    <session-id>/
-      spec.json
-      status.json
-
-      batches/
-        00000000000000000000.json
-        00000000000000000001.json
-
-      events/
-        00000000000000000000.json
-        00000000000000000001.json
+  control.sqlite3
+  control.sqlite3-wal    # SQLite 运行时文件
+  control.sqlite3-shm    # SQLite 运行时文件
 ```
 
 规则：
 
-- 序号文件名固定 20 位十进制补零，字典序等于数值顺序。
-- `.tmp/` 和目标目录中的 `.tmp-*` 内容从不视为已提交事实。
-- Store 根目录和 Session 目录默认权限为 `0700`。
-- JSON 文件默认权限为 `0600`。
-- `status.json` 丢失或损坏时忽略并重建。
-- Permission Snapshot 使用与 Config Revision 相同的规范 JSON 和 SHA-256 内容寻址规则；Activation Event 只保存引用。
+- Store 根目录默认权限为 `0700`，数据库及其 WAL/SHM 文件默认权限为 `0600`。
+- 第一版使用 `rusqlite`，不引入 ORM、异步 SQL 驱动或 migration framework。
+- 写连接启用 foreign keys、WAL 和明确的 busy timeout。
+- ragentd 必须先获取 `writer.lock` 的 OS advisory exclusive lock，再以读写模式打开数据库。第一版只有持锁的 ragentd 拥有写连接；进程内可以使用独立只读连接。
+- 只读诊断工具必须使用 SQLite read-only URI 和 `query_only`，不执行 schema migration。
+- Permission Snapshot 与 Config Revision 使用规范 JSON 的 SHA-256 内容寻址；Activation Event 只保存引用。
 
-### 7.2 Store 格式文件
+### 7.2 Schema 版本
 
-```json
-{
-  "store_format": "ragent-directory-store",
-  "major": 1,
-  "minor": 0,
-  "open_responses_schema": "openresponses-rust-2026.7.26"
-}
+`store_meta` 至少保存：
+
+```text
+store_format = ragent-sqlite-store
+schema_major = 1
+schema_minor = 0
+open_responses_schema = openresponses-rust-2026.7.26
 ```
 
 规则：
 
 - major 不支持时拒绝打开。
 - minor 高于当前实现时，只有明确声明向前兼容才允许只读打开。
-- 第一版不实现旧格式迁移。
+- 初始 schema 在一个事务中创建。第一版不读取或迁移 Directory Store 和旧 Session 文件。
+- SQLite `user_version` 与 `store_meta` 必须一致，不一致时拒绝写入。
 
-### 7.3 单 Writer 所有权
+### 7.3 核心表和约束
 
-ragentd 启动时必须获取 `writer.lock` 的 OS advisory exclusive lock。获取失败意味着已有 writer，进程必须退出，不能降级为无锁写入。
-
-只读诊断工具可以在明确的只读模式下打开 Store，但不得创建临时事实文件。
-
-### 7.4 原子文件提交
-
-所有事实提交使用：
+第一版使用领域表，不建设通用 resource 表：
 
 ```text
-serialize to bytes
-  → create tmp file with create_new
-  → write_all
-  → flush
-  → sync_all according to durability mode
-  → rename to final path
-  → optionally fsync parent directory
+store_meta(key PRIMARY KEY, value)
+configs(config_ref PRIMARY KEY, payload_json)
+permission_snapshots(permission_ref PRIMARY KEY, payload_json)
+workspaces(workspace_id PRIMARY KEY, payload_json)
+sessions(session_id PRIMARY KEY, created_at, spec_json)
+session_sources(child_session_id, source_order, source_session_id,
+                from_context_pos, through_context_pos)
+batches(session_id, batch_seq, first_local_item_seq, last_local_item_seq,
+        kind, activation_id, turn_id, response_id, payload_json)
+events(session_id, event_seq, kind, activation_id, batch_seq,
+       turn_id, response_id, call_id, payload_json)
+command_results(command_id PRIMARY KEY, idempotency_key UNIQUE,
+                request_hash, result_kind, result_json)
+session_status(session_id PRIMARY KEY, projected_through_event_seq,
+               projected_through_batch_seq, payload_json)
 ```
 
-Durability 模式：
+必须有以下数据库约束：
+
+- `batches` 的 `(session_id, batch_seq)` 和 Local Item 起止范围唯一。
+- `events` 的 `(session_id, event_seq)` 唯一。
+- Source、Batch、Event、Status 通过 foreign key 引用 Session；Event 引用 Batch 时也使用可验证的外键。
+- `source_order` 保持 Source 声明顺序，反向关系查询使用 `source_session_id` 索引。
+- Store Writer 对事实表只执行 INSERT，正常 API 不提供 UPDATE/DELETE；通过封装的写接口和测试防止历史被改写。
+- JSON 列保存稳定的领域 JSON，关系键和高频过滤字段单独建列，不在 SQL 中重建第二套 Item 模型。
+
+### 7.4 单 Writer 和事务边界
+
+所有写命令通过 bounded channel 进入单个专用 blocking Store Writer thread，该线程独占 `rusqlite::Connection`，并通过 oneshot 返回结果给异步调用方。Writer 对每个命令执行：
+
+```text
+BEGIN IMMEDIATE
+  → validate command and referenced facts
+  → allocate Session-local sequences
+  → insert immutable facts
+  → insert command result
+  → update rebuildable projection
+COMMIT
+  → publish in-memory notification
+```
+
+一个业务不变量涉及多行时，这些行必须由一个 Store 命令在同一事务内提交。典型例子包括：
+
+- 创建 Session、Source rows、初始 Event 和初始投影。
+- Activation Input Batch 和 `ActivationRequested` Event。
+- ToolOutput Batch 和引用它的 `ToolCallFinished` Event。
+- ModelOutput Batch 和引用它的 `TurnCompleted` Event。
+- Permission Resolution、新 Permission Snapshot 引用和状态投影。
+
+因此不使用“先 Batch、后 Event、恢复时补齐”的最终一致协议。COMMIT 返回成功后事实已生效；后续 Observer 或内存 broadcast 失败不回滚历史。
+
+Durability 模式映射到 SQLite `synchronous` 配置：
 
 ```rust
 pub enum DurabilityMode {
-    Strict,
-    Balanced,
+    Strict,   // synchronous=FULL
+    Balanced, // synchronous=NORMAL with WAL
 }
 ```
 
-- Strict：文件和父目录都同步，适合关键 Session。
-- Balanced：保证进程崩溃一致性，但允许操作系统延后最终落盘。
-- 第一版默认 Balanced，并允许全局配置 Strict。
-
-目标路径已存在时：
-
-- 内容完全相同：视为幂等成功。
-- 内容不同：返回 Store Corruption/Conflict，禁止覆盖。
+第一版默认 Balanced，并允许全局配置 Strict。
 
 ### 7.5 创建 Session
 
 创建流程：
 
 1. 验证 ID、Config Ref、Workspace Ref 和所有 Source；Workspace 必须已经信任。
-2. 验证 Source 图无环。
+2. 在同一写事务中验证 Source 存在、范围有效且图无环。
 3. 创建稳定路径 `/tmp/ragent/<session-id>` 的 Session 临时目录。
 4. 解析现有全局和项目权限层，生成该临时目录的文件读、文件写和命令工作目录三条最小允许规则。
-5. 在 Store 根级 `.tmp/` 创建完整 Session 目录。
-6. 写入 `spec.json`。
-7. 写入 Event 0 `SessionCreated`，随后写入一个包含三条规则的 `SessionPermissionBootstrapped` Event。
-8. 生成初始 `status.json`。
-9. 原子 rename 临时 Session 目录为最终目录。
-10. 更新内存 Session/Relation 索引。
-11. 向订阅者发布 committed event。
+5. 在一个事务中插入 Session Spec、有序 Source rows、`SessionCreated` Event、`SessionPermissionBootstrapped` Event、命令结果和初始状态投影。
+6. COMMIT 成功后向订阅者发布 committed event。
 
-Session 临时目录可以被操作系统清理，因此 Runner 启动时负责按相同路径重建；授权事实不需要重写。若创建 Session 目录事实失败，应尽力清理刚创建但尚未对外提交的临时目录。
+Session 临时目录可以被操作系统清理，因此 Runner 启动时负责按相同路径重建；授权事实不需要重写。若事务失败，Session 和其初始 Event 均不可见，并应尽力清理刚创建的临时目录。
 
-Session 目录已存在时：
+Session ID 已存在时：Spec 和请求 hash 完全相同则返回首次结果，否则返回 ID Conflict。
 
-- Spec 完全相同：幂等成功。
-- Spec 不同：返回 ID Conflict。
+### 7.6 追加 Batch 和 Event
 
-### 7.6 追加 Batch
+Store Writer 不依赖启动时扫描得到的 tail。它在写事务内读取当前最大序号，校验调用方携带的 `expected_next_local_item_seq`，再分配 Batch Seq、Local Item Seq 和 Event Seq。唯一约束是并发错误的最后防线。
 
-Store Writer 维护每个 Session 的：
+通用 Batch 提交必须：
 
-```rust
-struct SessionTail {
-    next_batch_seq: BatchSeq,
-    next_local_item_seq: LocalItemSeq,
-    next_event_seq: EventSeq,
-}
-```
+1. 检查 Session 允许该操作。
+2. 检查命令幂等性和 expected tail。
+3. 验证每个 Open Responses Item、Batch kind 和 metadata。
+4. 验证 FunctionCallOutput 的 `call_id` 存在于该 Session 的有效上下文，且与已完成输出不冲突。
+5. 插入 Batch、相关 Event、命令结果和投影，然后一次 COMMIT。
+6. COMMIT 后发布内存通知。
 
-追加命令必须携带：
+Event 引用 Batch 时，Store 必须验证 Session ID、Batch kind、Activation ID、Turn ID、Response ID 和 Tool Call ID 等关联字段，不得只验证“引用的 Batch 存在”。
 
-```rust
-struct AppendBatchCommand {
-    command_id: CommandId,
-    idempotency_key: String,
-    session_id: SessionId,
-    expected_next_local_item_seq: LocalItemSeq,
-    batch: NewItemBatch,
-}
-```
+`context.append.prepare` 必须由 Agent Core 或 Session Controller 在调用 Store 前完成。Store 只接受最终候选并执行独立验证，不加载 Extension。提交成功后，调用方再执行 `context.append.observe`。
 
-提交步骤：
+### 7.7 幂等记录
 
-1. 检查 Session open。
-2. 检查幂等键。
-3. 检查 expected tail。
-4. 验证每个 Open Responses Item。
-5. 验证 Batch kind 与 metadata 约束。
-6. 分配 Batch Seq 和 Local Item Seq。
-7. 原子写 Batch 文件。
-8. 更新内存 tail 和状态投影。
-9. 原子更新 `status.json`。
-10. 发布 `batch.committed` 内存事件。
+每个可重试命令都必须提交 `CommandId`、幂等键和规范化请求 hash。`command_results` 与业务事实在同一事务写入：
 
-`context.append.prepare` 必须由 Agent Core 或 Session Controller 在调用 Store 前完成。Store 只接受最终候选并执行独立验证，不加载 Extension。提交成功后，调用方再执行 `context.append.observe`；即使 status 更新或 Observer 失败，Batch 仍然有效，恢复时重建投影。
+- Command ID 或幂等键未出现：执行命令。
+- Command ID、幂等键和请求 hash 都一致：返回首次的 `result_json`，不重复执行状态检查或写入。
+- 其中任一标识已被不同请求使用：返回 Idempotency Conflict。
 
-### 7.7 追加 Event
+幂等结果不从 Event 重建，因此进程重启后仍能精确返回首次结果。一个业务命令只使用一组 Command ID/幂等键，不要求其内部 Batch 和 Event 各自提供冲突的命令身份。
 
-Event 使用同样的临时文件加 rename 流程。Event 和 Batch 是两个独立事实流。
+### 7.8 投影和关系查询
 
-当一个业务步骤需要同时提交 Batch 和 Event 时，事实优先级为：
+- `session_status` 在事实事务内同步更新，但仍然只是可重建投影。
+- 读取状态时必须校验 `projected_through_*` 是否覆盖当前事实 tail；不一致时不得返回过期状态。
+- Source 正反关系直接通过 `session_sources` 和索引查询，可选内存缓存不是正确性条件。
+- Session 内 Batch/Event tail 通过索引查询，不在启动时逐 Session 扫描文件。
 
-1. 先提交 Batch。
-2. 再提交引用该 Batch 的 Event。
+重建工具在一致读事务中重放 Spec、Batch 和 Event，校验新投影后再以单独写事务替换 `session_status`。
 
-如果 Event 提交失败，恢复逻辑可以根据 Batch metadata 补充缺失事件。反向顺序会产生引用不存在 Batch 的 Event，因此禁止。
+### 7.9 完整性检查与备份
 
-第一版不试图实现跨文件 ACID transaction，而使用幂等 Controller 和恢复规则保持最终一致。这是轻量方案的明确取舍。
+每次启动执行轻量检查：
 
-### 7.8 幂等记录
+1. 校验 Schema 版本、必需表和索引。
+2. 确认 foreign keys 已启用，并执行 `foreign_key_check`。
+3. 执行 `quick_check`。
+4. 查找没有最终状态的 active Activation，以新事务追加 `ActivationInterrupted`。
+5. 校验投影游标，并按需重建投影。
 
-为避免单独维护可变幂等数据库：
+SQLite 负责回滚未提交事务和 WAL 恢复；ragent 不再扫描临时文件、猜测序号缺口或补写半完成的 Batch/Event 组合。离线深度诊断可额外执行 `integrity_check`。
 
-- Session 创建使用确定的 Session ID 作为幂等边界。
-- ActivationRequested Event 保存 Command ID 和幂等键。
-- Store Writer 启动时构建 `idempotency_key → result` 内存索引。
-- 重复命令返回第一次提交的资源 ID 或序号。
-
-对于非常大的 Store，未来可增加可重建的幂等索引文件；第一版不需要。
-
-### 7.9 状态和关系索引
-
-启动时扫描：
-
-- `sessions/*/spec.json` 构建 Session 索引。
-- Spec Sources 构建正向和反向关系索引。
-- 每个 Session 最后一个 Batch/Event 文件构建 tail。
-- `status.json` 有效时使用缓存，否则完整重放该 Session。
-
-内存索引：
-
-```rust
-struct StoreIndex {
-    sessions: HashMap<SessionId, SessionSummary>,
-    children_by_source: HashMap<SessionId, Vec<SessionId>>,
-    tails: HashMap<SessionId, SessionTail>,
-    active_activations: HashMap<SessionId, ActivationId>,
-}
-```
-
-索引不是事实源。
+备份必须使用 SQLite Online Backup API 或停止 writer 后复制经 checkpoint 的数据库，不得在 writer 运行时只复制 `control.sqlite3` 主文件。
 
 ### 7.10 物理删除
 
-正常 Control Plane API 不提供事实文件删除。物理清理通过离线 maintenance 命令完成，并要求：
+正常 Control Plane API 不提供事实删除。物理清理通过离线 maintenance 命令完成，并要求：
 
 1. Session 已处于 Archived。
 2. 没有 active 或 queued Activation。
-3. 反向关系索引中不存在引用该 Session 的 Source。
-4. ragentd 停止写入或 maintenance 命令持有 writer lock。
-5. 先将 Session 目录原子移动到 Store 外的 trash 目录，再执行实际删除。
+3. `session_sources` 中不存在引用该 Session 的子 Session。
+4. ragentd 已停止，并在操作前完成一致备份。
+5. 在一个 maintenance 事务中按显式顺序删除投影和事实，然后执行完整性检查。
 
 如果存在子 Session，默认拒绝；第一版不提供级联删除。Context append-only 保证适用于仍由 Store 管理的 Session，不阻止用户执行明确的离线数据清理。
 
@@ -926,6 +892,11 @@ pub trait ControlStore: Send + Sync {
         &self,
         command: AppendBatchCommand,
     ) -> Result<CommittedBatch, StoreError>;
+
+    async fn commit_batch_with_event(
+        &self,
+        command: CommitBatchEventCommand,
+    ) -> Result<CommittedBatchEvent, StoreError>;
 
     async fn append_event(
         &self,
@@ -972,7 +943,9 @@ pub trait ControlStore: Send + Sync {
 }
 ```
 
-`DirectoryControlStore` 对外是异步接口，内部所有写命令发送给单独 Store Writer task。读取可以使用 `spawn_blocking` 或受控同步文件读取，不能在 Tokio executor 上进行大文件阻塞读取。
+`SqliteControlStore` 对外是异步接口，内部所有写命令发送给专用 Store Writer thread。只读查询和大 JSON 解析在受控 blocking worker 上执行，不阻塞 Tokio executor。
+
+`append_event` 只接受不需要同时产生 Batch 的 Event variant。Activation Input、ModelOutput 和 ToolOutput 等必须与 Event 保持不变量的操作使用 `commit_batch_with_event`，两者共享同一 `CommandMeta` 并在同一 SQLite 事务提交。
 
 `resolve_permission` 不是普通 `append_event` 的语法糖：Store Writer 必须在同一串行临界区确认目标 Request 已存在且尚未解决，再追加 Resolution，从而保证多前端竞争时只有一个 Decision 生效。
 
@@ -1045,7 +1018,7 @@ Agent Core 不负责：
 - Session 列表和派生关系。
 - 前端展示。
 - 跨 Session 调度。
-- 直接写 Directory Store。
+- 直接连接或写 SQLite Control Store。
 - 文件协作追踪。
 
 ### 10.2 请求构建
@@ -1537,7 +1510,7 @@ TUI 连接相同 Unix Socket，维护的只是界面状态：
 
 ### 16.3 WebUI
 
-WebUI 不直接连接 Directory Store。独立 `ragent-http` Adapter 将 Control Plane Protocol 映射为：
+WebUI 不直接连接 SQLite Control Store。独立 `ragent-http` Adapter 将 Control Plane Protocol 映射为：
 
 - HTTP query/command。
 - SSE event stream。
@@ -1594,36 +1567,33 @@ Control Plane 不记录：
 
 ### 18.1 启动恢复步骤
 
-1. 获取 writer lock。
-2. 读取并验证 Store Format。
-3. 清理或隔离所有临时文件和临时 Session 目录。
-4. 扫描 Config、Permission Snapshot 和 Workspace。
-5. 扫描 Session Spec，构建 DAG。
-6. 验证无环和 Source 范围。
-7. 扫描 Batch/Event tail。
-8. 验证序号连续、文件名与内容序号一致。
-9. 校验或重建 status projection。
-10. 找出没有最终状态的 active Activation。
-11. 追加 ActivationInterrupted。
-12. 重建幂等索引和 Activation 队列。
-13. 开始接受客户端连接。
+1. 获取 `writer.lock` 的 OS advisory exclusive lock；失败时拒绝作为 writer 启动。
+2. 以读写模式打开 `control.sqlite3`，启用 foreign keys、WAL、busy timeout 和配置的 durability。
+3. 读取并验证 Store Schema 版本，拒绝隐式迁移未知版本。
+4. 校验必需表和索引。
+5. 执行 `foreign_key_check` 和 `quick_check`。
+6. 查询并验证 Source 无环、范围有效，Batch/Event 序号连续且 metadata 引用一致。
+7. 校验 `session_status` 投影游标，对缺失或过期投影进行重建。
+8. 找出没有最终状态的 active Activation。
+9. 以新的幂等写事务追加 `ActivationInterrupted` 并同步更新投影。
+10. 重建可选的进程内缓存和 Activation 队列。
+11. 开始接受客户端连接。
 
 ### 18.2 损坏策略
 
-- 临时文件：忽略并移动到 quarantine 或删除。
-- 非法 JSON 事实文件：该 Session 标记 corrupted，禁止继续写。
-- Batch 序号缺口：标记 corrupted，不自动猜测。
-- Item 验证失败：标记 corrupted。
-- status 损坏：删除并重建，不标记 Session corrupted。
-- Config Ref 内容 hash 不匹配：拒绝使用所有引用该配置的 Activation。
+- SQLite `quick_check` 或 `integrity_check` 失败：拒绝写入，保留原数据库并引导用户从一致备份恢复。
+- Foreign key、序号或事件关联不变量失败：标记相关 Session corrupted，禁止继续写。
+- JSON payload 或 Open Responses Item 验证失败：标记相关 Session corrupted。
+- `session_status` 缺失、无法解析或投影游标落后：从事实重建，不标记 Session corrupted。
+- Config Ref 或 Permission Snapshot Ref 的内容 hash 不匹配：拒绝使用所有引用它的 Activation。
 
 第一版不自动修复或重写事实历史。
 
-### 18.3 Batch/Event 不一致
+### 18.3 业务事务与未知副作用
 
-- Batch 存在、引用 Event 缺失：可以由恢复 Controller 补写 Event。
-- Event 引用不存在 Batch：视为损坏，因为提交顺序违反协议。
-- ToolCallStarted 后无 ToolCallFinished：Activation 标记 interrupted，禁止自动重试未知副作用。
+- 必须成对的 Batch/Event 由同一事务提交；启动恢复不补写任何半完成组合。
+- COMMIT 返回前进程终止时，调用方使用相同 Command ID 和幂等键重试，由 `command_results` 判定是返回首次结果还是首次执行。
+- ToolCallStarted 后无 ToolCallFinished：Activation 标记 interrupted，禁止自动重试未知副作用。SQLite 事务不能回滚 Store 之外已发生的工具副作用。
 
 ## 19. 并发和背压
 
@@ -1636,8 +1606,8 @@ Control Plane 不记录：
 ### 19.2 读取
 
 - 不同 Session 的读取可以并行。
-- 单个大 Batch 的 JSON 解析在 blocking worker 上执行。
-- Context Projection 应按 Batch 顺序增量读取，避免一次扫描整个 Store。
+- 单个大 Batch 的 SQLite 读取和 JSON 解析在 blocking worker 上执行。
+- Context Projection 应使用 `(session_id, batch_seq)` 索引按 Batch 顺序增量读取。
 
 ### 19.3 Runner
 
@@ -1657,10 +1627,11 @@ Control Plane 不记录：
 ### 20.1 本地 Store
 
 - 根目录 `0700`。
-- 文件 `0600`。
+- SQLite 主文件、WAL 和 SHM `0600`。
 - writer socket 仅当前用户可访问。
 - 日志默认不打印完整 Item JSON。
 - reasoning carrier、工具参数和输出均按敏感数据处理。
+- 备份和诊断导出文件使用相同的敏感数据等级。
 
 ### 20.2 Extension
 
@@ -1682,7 +1653,7 @@ Session Permission Events                 # Session 增量策略
 
 macOS 在未设置 XDG 路径时使用平台标准用户配置目录。所有配置文件默认 `0600`，通过临时文件、flush 和原子 rename 更新。
 
-这些文件只是配置输入。Control Plane 解析后在 Directory Store 写入内容寻址的 `PermissionSnapshot`，Activation、Runner 和 Extension 只使用该快照，不各自读取或合并 TOML。因此运行时仍只有一份明确的有效配置，外部文件变化只影响之后生成的新快照。
+这些文件只是配置输入。Control Plane 解析后在 SQLite Control Store 写入内容寻址的 `PermissionSnapshot`，Activation、Runner 和 Extension 只使用该快照，不各自读取或合并 TOML。因此运行时仍只有一份明确的有效配置，外部文件变化只影响之后生成的新快照。
 
 合并是逐叶字段覆盖，不是对象整体替换。以 TOML 为例：
 
@@ -1777,7 +1748,7 @@ Session ID 决定稳定临时路径 `/tmp/ragent/<session-id>`。创建 Session 
 独立版本：
 
 ```text
-Directory Store Format
+SQLite Store Schema
 Session Spec Format
 Item Batch Format
 Session Event Format
@@ -1835,32 +1806,33 @@ Config Format
 - FunctionCall/FunctionCallOutput 配对验证。
 - Reasoning encrypted content byte-for-byte 保持。
 - Item Extension 未知 extra 字段保持。
-- Store read 后可以直接构造 `Input::Items`。
+- Store 读取 JSON payload 后可以直接构造 `Input::Items`。
 
 ### 23.3 Store 测试
 
-- Session 目录原子创建。
-- Batch 原子 append。
-- 目标文件冲突检测。
-- 临时文件恢复。
-- status 删除后重建。
-- 非法 JSON 和序号缺口检测。
-- 文件权限。
-- writer lock 独占。
-- 幂等命令重复提交。
+- Schema 初始化、版本拒绝和必需索引检查。
+- Session、Source、初始 Event 和投影的事务原子创建。
+- Batch/Event/幂等结果/投影的事务原子提交。
+- 唯一约束、foreign key、序号连续性和事件关联字段验证。
+- FunctionCallOutput `call_id` 必须对应有效上下文中的 FunctionCall。
+- 清空或改为过期的 `session_status` 后重建。
+- 非法 JSON、内容 hash 不匹配和事实序号缺口检测。
+- 数据库、WAL 和 SHM 文件权限。
+- 第二个 writer 被拒绝或按 busy timeout 失败。
+- 相同命令重试返回首次结果，请求 hash 不同时返回幂等冲突。
 
 ### 23.4 崩溃注入测试
 
 在以下位置强制终止：
 
-- 临时 Batch 创建前。
-- 写入一半后。
-- sync 后 rename 前。
-- rename 后 status 更新前。
-- Batch 后 Event 前。
+- 写事务开始前。
+- 插入 Batch 后、插入 Event 前。
+- 更新投影后、COMMIT 前。
+- COMMIT 完成后、返回调用方前。
+- COMMIT 完成后、内存 broadcast 前。
 - Tool 副作用后 ToolOutput Batch 前。
 
-恢复结果必须符合本方案的状态矩阵。
+恢复结果必须符合本方案的状态矩阵：未 COMMIT 的业务提交完全不可见，已 COMMIT 的业务提交完整可见，相同命令重试不产生重复事实。
 
 ### 23.5 Runner 测试
 
@@ -1907,7 +1879,7 @@ Config Format
 5. 保存 FunctionCallOutput。
 6. 模型返回最终 Message。
 7. 停止 ragentd。
-8. 删除 status cache。
+8. 清空 `session_status` 投影。
 9. 重启并得到相同上下文、状态和 Usage。
 10. 从第一轮结束位置 fork。
 11. 验证子 Session 没有复制父 Batch，且模型输入正确。
@@ -1919,10 +1891,10 @@ Config Format
 - Open Responses 依赖和原生 Item round-trip。
 - ID 和序号 newtype。
 - SessionSpec、ItemBatch、SessionEvent、ConfigRevision。
-- Directory layout。
+- SQLite schema、索引和不变量约束。
 - Store Writer。
-- 原子文件提交。
-- 启动恢复和 status projection。
+- 事务化事实提交和持久幂等结果。
+- 启动完整性检查和 `session_status` 投影重建。
 
 ### Milestone 2：Agent 纵向链路
 
@@ -1962,21 +1934,19 @@ Config Format
 
 只有出现实际瓶颈时才增加后端：
 
-- Session 数量大到启动扫描不可接受。
 - 需要多进程直接并发写。
 - 需要复杂关系查询。
-- 需要跨多个资源的严格事务。
 - 需要多机 Runner。
+- 单机 SQLite 数据库大小、写入延迟或备份窗口已经超出产品目标。
 
 升级时保持领域 API 和语义：
 
 ```text
-DirectoryControlStore
-  → SqliteControlStore
+SqliteControlStore
   → optional PostgresControlStore
 ```
 
-不承诺第一版磁盘文件可以被其他后端直接打开，但 SessionSpec、ItemBatch、SessionEvent 和 SessionSource 的 JSON 语义保持稳定，可通过显式导入导出迁移。
+不承诺 SQLite 磁盘文件可以被其他后端直接打开，但 SessionSpec、ItemBatch、SessionEvent 和 SessionSource 的 JSON 语义保持稳定，可通过显式导入导出迁移。
 
 ## 26. 最终架构边界
 
@@ -1990,8 +1960,8 @@ ragent Core
 Control Plane
   定义 Session、Activation、Runner、命令和状态协调
 
-Directory Store
-  保存不可变 Spec、Item Batch、Event 和配置修订
+SQLite Control Store
+  在事务中保存不可变 Spec、Item Batch、Event、配置修订和幂等结果
 
 Extension
   提供工具、变换、观察、策略和受控 Action

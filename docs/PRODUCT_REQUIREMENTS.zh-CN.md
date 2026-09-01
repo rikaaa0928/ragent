@@ -15,7 +15,7 @@ ragent 是一个轻量、可扩展、以 Session 为核心的本地 Agent 运行
 产品的基础构想类似一个被大幅简化的 Kubernetes：
 
 - Session 是最小工作台，类似 Pod。
-- Directory Store 是唯一事实源，承担轻量的控制面存储职责。
+- SQLite Control Store 是唯一事实源，承担轻量的控制面存储职责。
 - Session Runner 是可重建的执行器。
 - 生命周期 Hook 提供扩展点。
 - CLI、TUI 和 WebUI 是无状态客户端。
@@ -42,16 +42,16 @@ ragent 是一个轻量、可扩展、以 Session 为核心的本地 Agent 运行
 
 ### 3.1 轻量优先
 
-- 默认部署是一个本地进程和一个普通目录。
-- 第一版不依赖 SQLite、PostgreSQL、etcd、消息队列或分布式协调服务。
+- 默认部署是一个本地进程和一个 SQLite 数据库文件。
+- 第一版只依赖进程内 SQLite，不依赖 PostgreSQL、etcd、消息队列或分布式协调服务。
 - 不为尚未出现的规模问题提前引入复杂基础设施。
 - 不为了形式上的通用性建设 CRD、通用资源引擎或任意 JSON 工作流系统。
 
 ### 3.2 单一事实源
 
-- Session 的不可变定义、上下文追加批次、生命周期事件和配置修订都保存在 Directory Store。
+- Session 的不可变定义、上下文追加批次、生命周期事件和配置修订都保存在 SQLite Control Store。
 - Runner 和前端不保存不可恢复的业务状态。
-- 可变的状态文件仅作为缓存，删除后必须能够从事实数据重建。
+- 可变的状态投影仅作为缓存，清空后必须能够从事实数据重建。
 - 同一份配置只保存一次，其余数据通过内容寻址引用。
 
 ### 3.3 上下文只追加
@@ -121,7 +121,7 @@ Session 的一次外部激活，通常由一次用户提交、Controller 请求�
 
 ### Item Batch
 
-一次原子追加的一组 Open Responses Item。Batch 是 Directory Store 的最小上下文提交单位。
+一次原子追加的一组 Open Responses Item。Batch 是 SQLite Control Store 的最小上下文提交单位。
 
 ### Context Projection
 
@@ -177,7 +177,7 @@ Runner 或 Extension 在执行文件访问、HTTP 请求或命令前提交的结
 - 多机器调度和分布式一致性。
 - etcd、数据库集群或消息队列。
 - Session 间 Exchange、发布订阅和消费游标。
-- 多进程直接写 Directory Store。
+- 多个 ragentd 进程同时写同一 SQLite Control Store。
 - 自动追踪共享目录中的 Session 交互。
 - 模型 Token 流式输出。
 - 通用工作流 DSL。
@@ -407,7 +407,7 @@ Extension 只能变换待追加 Item 或 Context Projection，不得修改 Store
 
 #### PRD-EXT-005 控制面动作
 
-Extension 创建 Session 或执行其他控制面动作时，只能返回结构化 Command，不得直接操作 Store 文件。
+Extension 创建 Session 或执行其他控制面动作时，只能返回结构化 Command，不得直接连接或操作 Control Store。
 
 ### 8.8 CLI、TUI 和 WebUI
 
@@ -512,20 +512,20 @@ Extension 不得获得未声明的环境能力。文件访问和 HTTP 通过受�
 ### 9.1 可理解性
 
 - 核心热路径中不得存在同构数据模型转换链。
-- Store 中的 Open Responses Item 必须可以直接用普通 JSON 工具阅读。
-- Directory Store 的事实文件命名和顺序必须确定且可检查。
+- Store 中的 Open Responses Item 必须保持原生 JSON 语义，并可通过标准 SQLite/JSON 工具查询。
+- Batch 和 Event 的 Session 内序号必须连续、唯一且可检查。
 
 ### 9.2 可靠性
 
-- 所有事实文件必须通过临时文件加原子 rename 提交。
-- 进程崩溃不得产生半个 JSON Batch。
-- 临时文件不得被当作已提交事实。
-- 状态缓存损坏不得影响事实数据恢复。
+- 所有事实写入必须在 SQLite 事务中提交。
+- 进程崩溃后，一次业务提交中的 Batch、Event、幂等结果和状态投影必须全部可见或全部不可见。
+- 未提交事务不得被当作事实。
+- 状态投影缺失或不一致不得影响事实数据恢复。
 
 ### 9.3 安全性
 
 - Store 根目录默认权限为仅当前用户可访问。
-- Session、配置和事件文件默认权限为仅当前用户可读写。
+- SQLite 主数据库、WAL 和 SHM 文件默认权限为仅当前用户可读写。
 - Extension 默认没有环境文件、网络或命令能力，只获得 Permission Snapshot 明确授予的 capability。
 - 项目配置未经目录信任不得读取或应用。
 - 权限询问、回答和持久授权必须可回溯，且不得依赖某个前端进程存活。
@@ -535,16 +535,16 @@ Extension 不得获得未声明的环境能力。文件访问和 HTTP 通过受�
 
 ### 9.4 性能
 
-- 单个 Session 的范围读取应按 Batch 顺序完成，不要求解析无关 Session。
+- 单个 Session 的范围读取应通过索引按 Batch 顺序完成，不扫描无关 Session。
 - 创建 fork 不得随父 Session 大小线性复制数据。
-- Session 列表和反向关系索引可以在进程内缓存，并能从 Spec 重建。
+- Session 列表和正反关系必须可通过 SQLite 索引查询；进程内缓存只是可选优化。
 - 第一阶段不为百万级 Session 或多机吞吐优化。
 
 ### 9.5 可演进性
 
-- Store Format、Control Plane Protocol 和 Extension Protocol 必须独立版本化。
+- Store Schema、Control Plane Protocol 和 Extension Protocol 必须独立版本化。
 - 不支持的主版本必须明确拒绝，不得静默解释。
-- 后续增加 SQLite 或远程 Store 时，不得改变 Session、Batch 和 Source 的领域语义。
+- 后续增加远程 Store 时，不得改变 Session、Batch 和 Source 的领域语义。
 
 ## 10. 产品成功标准
 
@@ -552,8 +552,8 @@ Extension 不得获得未声明的环境能力。文件访问和 HTTP 通过受�
 
 1. 可以创建一个无来源 Session，并异步执行一次包含工具调用的 Activation。
 2. 用户输入、模型输出和工具结果均以原生 Open Responses Item Batch 保存。
-3. 删除状态缓存后可以恢复相同 Session 状态。
-4. 在任意 Batch 提交期间强制终止进程，恢复后只能看到完整 Batch 或看不到该 Batch。
+3. 清空状态投影后可以恢复相同 Session 状态。
+4. 在任意事务提交期间强制终止进程，恢复后只能看到完整业务提交或完全看不到。
 5. 可以从父 Session 的固定上下文范围创建子 Session，且不复制父 Item。
 6. 子 Session 模型输入能够按 Source 顺序加自身 Item 正确装配。
 7. 同一 Session 的并发 Activation 不会同时运行。
@@ -571,7 +571,7 @@ Extension 不得获得未声明的环境能力。文件访问和 HTTP 通过受�
 
 ### Phase 1：最小控制面
 
-- Directory Store。
+- SQLite Control Store。
 - Session Spec。
 - Config Revision。
 - Item Batch。
@@ -602,7 +602,6 @@ Extension 不得获得未声明的环境能力。文件访问和 HTTP 通过受�
 
 ### 未来按实际需求评估
 
-- SQLite Control Store。
 - PostgreSQL 或远程 Control Store。
 - 多机 Runner。
 - 自动压缩 Controller。
@@ -615,7 +614,7 @@ Extension 不得获得未声明的环境能力。文件访问和 HTTP 通过受�
 - 不追踪 Session Runner 通过目录文件发生的交互。
 - 不把 Open Responses Item 转换为内部消息模型。
 - 不允许原地压缩、删除或替换 Session 历史。
-- 不让前端直接写 Store 文件。
-- 不让 Extension 直接写 Store 文件。
+- 不让前端直接连接或写 Control Store。
+- 不让 Extension 直接连接或写 Control Store。
 - 不将 Agent Runner 作为 Session 的持久状态容器。
-- 不在第一阶段引入数据库、分布式协调或网络服务依赖。
+- 不在第一阶段引入外部数据库服务、分布式协调或消息队列依赖。
