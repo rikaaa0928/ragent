@@ -385,7 +385,7 @@ Input Batch committed
   → else ActivationCompleted
 ```
 
-工具按模型输出顺序串行执行。单次 Activation 设置明确的最大 Turn 数，避免无限循环。
+工具按模型输出顺序串行执行。Activation 在模型不再返回 FunctionCall、用户取消或发生错误时结束，不设固定 Turn 数上限。
 
 ## 9. ControlService 和 Runner
 

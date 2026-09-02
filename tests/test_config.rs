@@ -2,7 +2,7 @@ mod common;
 
 use common::{file_editor_component_path, shell_component_path};
 use openresponses_rust::{ReasoningConfig, ReasoningEffort, ReasoningSummary};
-use ragent::{AgentConfig, ExtensionManager};
+use ragent::{AgentConfig, HookManager};
 
 #[tokio::test]
 async fn config_loads_model_settings_and_reasoning_from_config_toml() {
@@ -24,7 +24,7 @@ enabled = false
 "#;
     std::fs::write(temp.path().join("config.toml"), config_toml).unwrap();
 
-    let manager = ExtensionManager::load_from_dir(temp.path()).await.unwrap();
+    let manager = HookManager::load_from_dir(temp.path()).await.unwrap();
     assert!(manager.model_settings().is_some());
 
     let settings = manager.model_settings().unwrap();
@@ -66,7 +66,7 @@ context_summary = "off"
 "#;
     std::fs::write(temp.path().join("config.toml"), config_toml).unwrap();
 
-    let manager = ExtensionManager::load_from_dir(temp.path()).await.unwrap();
+    let manager = HookManager::load_from_dir(temp.path()).await.unwrap();
     let settings = manager.model_settings().unwrap();
 
     let mut config = AgentConfig::new("https://example.com", "fake_key", "default-model");
@@ -87,7 +87,7 @@ context_summary = "off"
 context_summary = "on"
 "#;
     std::fs::write(temp.path().join("config.toml"), config_on).unwrap();
-    let manager_on = ExtensionManager::load_from_dir(temp.path()).await.unwrap();
+    let manager_on = HookManager::load_from_dir(temp.path()).await.unwrap();
     let mut cfg_on = AgentConfig::new("https://example.com", "fake_key", "default-model");
     cfg_on.apply_model_settings(manager_on.model_settings().unwrap());
     assert_eq!(cfg_on.context_summary, ragent::ContextSummaryMode::On);
@@ -122,10 +122,9 @@ effort = "high"
     let project_config_file = project_dir.join("config.toml");
     std::fs::write(&project_config_file, project_config).unwrap();
 
-    let manager =
-        ExtensionManager::load_with_project_config(temp_global.path(), &project_config_file)
-            .await
-            .unwrap();
+    let manager = HookManager::load_with_project_config(temp_global.path(), &project_config_file)
+        .await
+        .unwrap();
 
     let settings = manager.model_settings().expect("settings should exist");
     // name: overridden by project
@@ -184,10 +183,9 @@ nested = { b = 3, c = 4 }
 "#;
     std::fs::write(&project_config_file, project_config_valid).unwrap();
 
-    let manager =
-        ExtensionManager::load_with_project_config(temp_global.path(), &project_config_file)
-            .await
-            .unwrap();
+    let manager = HookManager::load_with_project_config(temp_global.path(), &project_config_file)
+        .await
+        .unwrap();
 
     // Only shell is enabled, file_editor disabled
     assert_eq!(manager.plugins().len(), 1);
@@ -200,8 +198,7 @@ name = "unknown_ext"
 enabled = true
 "#;
     std::fs::write(&project_config_file, project_config_unknown_name).unwrap();
-    let err =
-        ExtensionManager::load_with_project_config(temp_global.path(), &project_config_file).await;
+    let err = HookManager::load_with_project_config(temp_global.path(), &project_config_file).await;
     let err_msg = match err {
         Err(e) => e.to_string(),
         Ok(_) => panic!("expected error"),
@@ -215,8 +212,7 @@ name = "shell"
 path = "some/other/path.wasm"
 "#;
     std::fs::write(&project_config_file, project_config_invalid_fields).unwrap();
-    let err =
-        ExtensionManager::load_with_project_config(temp_global.path(), &project_config_file).await;
+    let err = HookManager::load_with_project_config(temp_global.path(), &project_config_file).await;
     assert!(err.is_err());
 
     // 4. Reject duplicate extension name in project config
@@ -230,8 +226,7 @@ name = "shell"
 enabled = false
 "#;
     std::fs::write(&project_config_file, project_config_duplicate).unwrap();
-    let err =
-        ExtensionManager::load_with_project_config(temp_global.path(), &project_config_file).await;
+    let err = HookManager::load_with_project_config(temp_global.path(), &project_config_file).await;
     let err_msg = match err {
         Err(e) => e.to_string(),
         Ok(_) => panic!("expected error"),
@@ -259,8 +254,7 @@ path = {:?}
     )
     .unwrap();
     let err =
-        ExtensionManager::load_with_project_config(temp_global_dup.path(), &project_config_file)
-            .await;
+        HookManager::load_with_project_config(temp_global_dup.path(), &project_config_file).await;
     let err_msg = match err {
         Err(e) => e.to_string(),
         Ok(_) => panic!("expected error"),

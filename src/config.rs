@@ -78,8 +78,6 @@ pub struct AgentConfig {
     pub temperature: Option<f64>,
     /// 最大输出 Token 数 (可选)
     pub max_output_tokens: Option<i32>,
-    /// 最大保护循环轮次 (默认 0，0 表示不限制)
-    pub max_iterations: usize,
     /// 思考/推理配置 (默认 None)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningConfig>,
@@ -102,7 +100,6 @@ impl AgentConfig {
             model_override: None,
             temperature: None,
             max_output_tokens: None,
-            max_iterations: 0,
             reasoning: None,
             context_summary: ContextSummaryMode::default(),
         }
@@ -167,12 +164,6 @@ impl AgentConfig {
     /// 设置最大输出 Token
     pub fn with_max_output_tokens(mut self, max_tokens: i32) -> Self {
         self.max_output_tokens = Some(max_tokens);
-        self
-    }
-
-    /// 设置最大循环次数保护
-    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
-        self.max_iterations = max_iterations;
         self
     }
 

@@ -1,6 +1,6 @@
 use openresponses_rust::ReasoningEffort;
 use ragent::cli::{parse_cli_args, CliCommand};
-use ragent::{AgentBuilder, AgentConfig, ExtensionManager};
+use ragent::{AgentConfig, HookManager};
 use std::path::PathBuf;
 
 #[test]
@@ -15,7 +15,7 @@ fn cli_parses_model_override_options() {
     let parsed = parse_cli_args(&args).unwrap();
     assert_eq!(parsed.custom_model.as_deref(), Some("gpt-4o"));
     match parsed.command {
-        CliCommand::RunNewSession { prompt } => assert_eq!(prompt, "帮我写个脚本"),
+        CliCommand::RunNew { prompt, .. } => assert_eq!(prompt, "帮我写个脚本"),
         _ => panic!("unexpected command"),
     }
 
@@ -29,7 +29,7 @@ fn cli_parses_model_override_options() {
     let parsed = parse_cli_args(&args).unwrap();
     assert_eq!(parsed.custom_model.as_deref(), Some("gpt-4o-mini"));
     match parsed.command {
-        CliCommand::RunNewSession { prompt } => assert_eq!(prompt, "写一个快速排序"),
+        CliCommand::RunNew { prompt, .. } => assert_eq!(prompt, "写一个快速排序"),
         _ => panic!("unexpected command"),
     }
 
@@ -56,7 +56,7 @@ fn cli_parses_model_override_options() {
     let parsed = parse_cli_args(&args).unwrap();
     assert_eq!(parsed.custom_model.as_deref(), Some("deepseek-r1"));
 
-    // 5. s resume with -m and -d
+    // 5. s run with -m and -d
     let args = vec![
         "ragent".into(),
         "s".into(),
@@ -65,15 +65,15 @@ fn cli_parses_model_override_options() {
         "-m".into(),
         "custom-model".into(),
         "-d".into(),
-        "/tmp/sessions".into(),
+        "/tmp/store".into(),
     ];
     let parsed = parse_cli_args(&args).unwrap();
     assert_eq!(parsed.custom_model.as_deref(), Some("custom-model"));
-    assert_eq!(parsed.custom_dir, Some(PathBuf::from("/tmp/sessions")));
+    assert_eq!(parsed.custom_dir, Some(PathBuf::from("/tmp/store")));
     match parsed.command {
-        CliCommand::ResumeSession { session_id, prompt } => {
-            assert_eq!(session_id.as_deref(), Some("sess_12345"));
-            assert_eq!(prompt, "继续");
+        CliCommand::SessionRun { session_id, input } => {
+            assert_eq!(session_id, "sess_12345");
+            assert_eq!(input, "继续");
         }
         _ => panic!("unexpected command"),
     }
@@ -88,7 +88,7 @@ fn cli_parses_model_override_options() {
     ];
     let parsed = parse_cli_args(&args).unwrap();
     assert_eq!(parsed.custom_model.as_deref(), Some("gpt-4o"));
-    assert!(matches!(parsed.command, CliCommand::ListSessions));
+    assert!(matches!(parsed.command, CliCommand::SessionList));
 
     let args = vec![
         "ragent".into(),
@@ -100,7 +100,7 @@ fn cli_parses_model_override_options() {
     let parsed = parse_cli_args(&args).unwrap();
     assert_eq!(parsed.custom_model.as_deref(), Some("gpt-4o"));
     match parsed.command {
-        CliCommand::ViewSession { session_id } => assert_eq!(session_id, "sess_abc"),
+        CliCommand::SessionShow { session_id } => assert_eq!(session_id, "sess_abc"),
         _ => panic!("unexpected command"),
     }
 
@@ -150,10 +150,9 @@ effort = "high"
     let project_config_file = project_dir.join("config.toml");
     std::fs::write(&project_config_file, project_config).unwrap();
 
-    let manager =
-        ExtensionManager::load_with_project_config(temp_global.path(), &project_config_file)
-            .await
-            .unwrap();
+    let manager = HookManager::load_with_project_config(temp_global.path(), &project_config_file)
+        .await
+        .unwrap();
 
     // 1. Without model override: fallback to project / global
     let mut config_default =
@@ -180,20 +179,4 @@ effort = "high"
         config_overridden.reasoning.as_ref().unwrap().effort,
         Some(ReasoningEffort::High)
     );
-
-    // 3. Builder with_model
-    let (agent, _) = AgentBuilder::new(
-        AgentConfig::new("https://example.com", "fake_key", "some-model")
-            .with_model("builder-override-model"),
-    )
-    .with_extension_manager(
-        ExtensionManager::load_with_project_config(temp_global.path(), &project_config_file)
-            .await
-            .unwrap(),
-    )
-    .build()
-    .await
-    .unwrap();
-
-    assert_eq!(agent.config().model, "builder-override-model");
 }

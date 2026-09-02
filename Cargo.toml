@@ -19,6 +19,14 @@ wasmtime-wasi = "37"
 toml = "0.8"
 dirs = "5.0"
 directories = "5"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+uuid = { version = "1.0", features = ["v7", "v4", "serde"] }
+fs2 = "0.4"
+
+[features]
+default = []
+test-utils = []
 
 [dev-dependencies]
 tempfile = "3.27.0"

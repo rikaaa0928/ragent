@@ -30,11 +30,17 @@ pub enum AgentError {
     #[error("JSON serialization/deserialization error: {0}")]
     JsonError(#[from] serde_json::Error),
 
-    #[error("Maximum iterations reached ({0})")]
-    MaxIterationsReached(usize),
-
     #[error("Hook '{hook}' rejected the operation: {reason}")]
     HookRejected { hook: String, reason: String },
+
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+
+    #[error("Session is currently locked: {0}")]
+    SessionLocked(String),
+
+    #[error("Operation cancelled")]
+    Cancelled,
 }
 
 impl From<ClientError> for AgentError {

@@ -1,6 +1,6 @@
 use crate::error::AgentError;
-use crate::wasm::types::{ExtensionMetadata, HookRequest};
-use std::path::Path;
+use crate::hooks::protocol::{ExtensionMetadata, HookRequest};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use wasmtime::component::{Component, Linker};
@@ -80,10 +80,22 @@ pub struct WasmPlugin {
     pub name: String,
     metadata: ExtensionMetadata,
     runtime: Mutex<PluginRuntime>,
+    #[cfg(any(test, debug_assertions, feature = "test-utils"))]
+    shutdown_call_count: std::sync::atomic::AtomicU64,
+    #[cfg(any(test, debug_assertions, feature = "test-utils"))]
+    simulate_shutdown_failure: std::sync::atomic::AtomicBool,
 }
 
 impl WasmPlugin {
     pub async fn load_from_file(name: impl Into<String>, path: &Path) -> Result<Self, AgentError> {
+        Self::load_from_file_with_dirs(name, path, &[]).await
+    }
+
+    pub async fn load_from_file_with_dirs(
+        name: impl Into<String>,
+        path: &Path,
+        preopen_dirs: &[PathBuf],
+    ) -> Result<Self, AgentError> {
         let mut config = Config::new();
         config.async_support(true);
         let engine = Engine::new(&config).map_err(tool_error)?;
@@ -102,9 +114,25 @@ impl WasmPlugin {
 
         let mut wasi_builder = WasiCtxBuilder::new();
         wasi_builder.inherit_stdout().inherit_stderr();
-        // 默认预授权当前目录及其子目录
-        if let Err(e) = wasi_builder.preopened_dir(".", ".", DirPerms::all(), FilePerms::all()) {
-            eprintln!("Warning: failed to preopen current directory: {e}");
+
+        if preopen_dirs.is_empty() {
+            // Default preopen current directory
+            if let Err(e) = wasi_builder.preopened_dir(".", ".", DirPerms::all(), FilePerms::all())
+            {
+                eprintln!("Warning: failed to preopen current directory: {e}");
+            }
+        } else {
+            for dir in preopen_dirs {
+                if let Some(dir_str) = dir.to_str() {
+                    let _ = wasi_builder.preopened_dir(
+                        dir_str,
+                        dir_str,
+                        DirPerms::all(),
+                        FilePerms::all(),
+                    );
+                }
+            }
+            let _ = wasi_builder.preopened_dir(".", ".", DirPerms::all(), FilePerms::all());
         }
 
         let host_state = HostState {
@@ -130,6 +158,10 @@ impl WasmPlugin {
             name: name.into(),
             metadata,
             runtime: Mutex::new(PluginRuntime { store, bindings }),
+            #[cfg(any(test, debug_assertions, feature = "test-utils"))]
+            shutdown_call_count: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-utils"))]
+            simulate_shutdown_failure: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -162,7 +194,34 @@ impl WasmPlugin {
         serde_json::from_str(&response).map_err(AgentError::JsonError)
     }
 
+    #[cfg(any(test, debug_assertions, feature = "test-utils"))]
+    pub fn set_simulate_shutdown_failure(&self, fail: bool) {
+        self.simulate_shutdown_failure
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(any(test, debug_assertions, feature = "test-utils"))]
+    pub fn shutdown_call_count(&self) -> u64 {
+        self.shutdown_call_count
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub async fn shutdown(&self) -> Result<(), AgentError> {
+        #[cfg(any(test, debug_assertions, feature = "test-utils"))]
+        {
+            self.shutdown_call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self
+                .simulate_shutdown_failure
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(AgentError::ToolError(format!(
+                    "{}: injected shutdown failure",
+                    self.name
+                )));
+            }
+        }
+
         let mut runtime = self.runtime.lock().await;
         let PluginRuntime { store, bindings } = &mut *runtime;
         bindings

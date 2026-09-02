@@ -10,7 +10,7 @@ pub const HOOK_MODEL_RESPONSE_PREPARE: &str = "model.response.prepare";
 pub const HOOK_TOOL_CALL_PREPARE: &str = "tool.call.prepare";
 pub const HOOK_TOOLS_CALL: &str = "tools.call";
 pub const HOOK_TOOL_RESULT_PREPARE: &str = "tool.result.prepare";
-pub const HOOK_CONTEXT_COMMIT: &str = "context.commit";
+pub const HOOK_CONTEXT_APPEND_PREPARE: &str = "context.append.prepare";
 pub const HOOK_TURN_COMPLETE: &str = "turn.complete";
 pub const HOOK_AGENT_ERROR: &str = "agent.error";
 pub const HOOK_AGENT_SHUTDOWN: &str = "agent.shutdown";
@@ -152,7 +152,6 @@ pub struct ToolCallRequest {
     pub arguments: serde_json::Value,
 }
 
-/// 工具执行内容的表达，支持纯文本字符串或多模态内容数组。
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolOutput {
     Text(String),

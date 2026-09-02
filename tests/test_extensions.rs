@@ -2,7 +2,7 @@ mod common;
 
 use common::{file_editor_component_path, image_viewer_component_path, shell_component_path};
 use ragent::{
-    AgentDraft, ExtensionManager, ModelDraft, ToolCallRequest, ToolOutput, ToolResult, WasmPlugin,
+    AgentDraft, HookManager, ModelDraft, ToolCallRequest, ToolOutput, ToolResult, WasmPlugin,
     HOOK_AGENT_PREPARE, HOOK_TOOLS_CALL,
 };
 
@@ -11,7 +11,7 @@ async fn shell_component_reports_command_failure() {
     let plugin = WasmPlugin::load_from_file("shell", &shell_component_path())
         .await
         .unwrap();
-    let mut manager = ExtensionManager::empty();
+    let mut manager = HookManager::empty();
     manager
         .add_plugin_with_config(plugin, serde_json::json!({"default_timeout_seconds": 1}))
         .unwrap();
@@ -127,7 +127,7 @@ async fn shell_component_accepts_zero_to_disable_timeout() {
     let plugin = WasmPlugin::load_from_file("shell", &shell_component_path())
         .await
         .unwrap();
-    let mut manager = ExtensionManager::empty();
+    let mut manager = HookManager::empty();
     manager
         .add_plugin_with_config(plugin, serde_json::json!({"default_timeout_seconds": 0}))
         .unwrap();
@@ -176,7 +176,7 @@ async fn file_editor_component_write_and_replace_test() {
     let plugin = WasmPlugin::load_from_file("file_editor", &file_editor_component_path())
         .await
         .unwrap();
-    let mut manager = ExtensionManager::empty();
+    let mut manager = HookManager::empty();
     manager.add_plugin(plugin).unwrap();
     manager.initialize().await.unwrap();
 
@@ -396,7 +396,7 @@ async fn image_viewer_component_view_test() {
     let plugin = WasmPlugin::load_from_file("image_viewer", &image_viewer_component_path())
         .await
         .unwrap();
-    let mut manager = ExtensionManager::empty();
+    let mut manager = HookManager::empty();
     manager
         .add_plugin_with_config(
             plugin,
@@ -425,7 +425,6 @@ async fn image_viewer_component_view_test() {
     assert_eq!(draft.tools[0].definition.name, "view_image");
 
     // 1. 创建一个合法的 1x1 纯色 PNG 图片用于测试
-    // 1x1 transparent PNG binary:
     let png_bytes: [u8; 67] = [
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // PNG signature
         0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, // IHDR
@@ -619,7 +618,7 @@ async fn extension_manager_loads_component_from_bootstrap_config() {
     );
     std::fs::write(temp.path().join("config.toml"), config).unwrap();
 
-    let manager = ExtensionManager::load_from_dir(temp.path()).await.unwrap();
+    let manager = HookManager::load_from_dir(temp.path()).await.unwrap();
     manager.initialize().await.unwrap();
     let (draft, _) = manager
         .transform_agent_draft(

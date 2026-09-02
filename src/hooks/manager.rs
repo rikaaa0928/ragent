@@ -1,6 +1,7 @@
+use crate::domain::config::ExtensionConfigItem;
 use crate::error::AgentError;
-use crate::wasm::runtime::WasmPlugin;
-use crate::wasm::types::*;
+use crate::hooks::protocol::*;
+use crate::hooks::runtime::WasmPlugin;
 use directories::BaseDirs;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -11,22 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtensionConfigItem {
-    pub name: String,
-    pub path: String,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub config: Value,
-}
-
-fn default_enabled() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ExtensionsConfig {
+pub struct ExtensionsConfigFile {
     #[serde(default)]
     pub model: Option<crate::config::ModelSettings>,
     #[serde(default)]
@@ -55,16 +42,122 @@ struct Subscriber {
     subscription: HookSubscription,
 }
 
-pub struct ExtensionManager {
+#[derive(Debug, Clone)]
+pub struct PrototypePermissionPolicy {
+    pub workspace_root: PathBuf,
+    pub session_tmp_dir: PathBuf,
+}
+
+fn canonicalize_or_resolve(path: &Path) -> PathBuf {
+    if let Ok(c) = path.canonicalize() {
+        return c;
+    }
+    let mut ancestors = Vec::new();
+    let mut curr = path;
+    while let Some(parent) = curr.parent() {
+        if let Some(file_name) = curr.file_name() {
+            ancestors.push(file_name);
+        }
+        if let Ok(canon_parent) = parent.canonicalize() {
+            let mut res = canon_parent;
+            for comp in ancestors.into_iter().rev() {
+                res.push(comp);
+            }
+            return res;
+        }
+        curr = parent;
+    }
+    normalize_path(path)
+}
+
+impl PrototypePermissionPolicy {
+    pub fn new(workspace_root: impl AsRef<Path>, session_tmp_dir: impl AsRef<Path>) -> Self {
+        let ws = canonicalize_or_resolve(workspace_root.as_ref());
+        let tmp = canonicalize_or_resolve(session_tmp_dir.as_ref());
+        Self {
+            workspace_root: ws,
+            session_tmp_dir: tmp,
+        }
+    }
+
+    pub fn is_path_allowed(&self, path: &Path) -> bool {
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.workspace_root.join(path)
+        };
+
+        let check_path = canonicalize_or_resolve(&resolved);
+
+        check_path.starts_with(&self.workspace_root)
+            || check_path.starts_with(&self.session_tmp_dir)
+    }
+
+    pub fn check_file_read(&self, path: &Path) -> Result<(), String> {
+        if self.is_path_allowed(path) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Permission denied: reading path {:?} outside workspace {:?} and session tmp {:?}",
+                path, self.workspace_root, self.session_tmp_dir
+            ))
+        }
+    }
+
+    pub fn check_file_write(&self, path: &Path) -> Result<(), String> {
+        if self.is_path_allowed(path) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Permission denied: writing path {:?} outside workspace {:?} and session tmp {:?}",
+                path, self.workspace_root, self.session_tmp_dir
+            ))
+        }
+    }
+
+    pub fn check_command_work_dir(&self, work_dir: &Path) -> Result<(), String> {
+        if self.is_path_allowed(work_dir) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Permission denied: command work_dir {:?} outside workspace {:?} and session tmp {:?}",
+                work_dir, self.workspace_root, self.session_tmp_dir
+            ))
+        }
+    }
+
+    pub fn check_http(&self) -> Result<(), String> {
+        Err("Permission denied: HTTP networking is disabled in Prototype".into())
+    }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        use std::path::Component;
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c.as_os_str()),
+        }
+    }
+    out
+}
+
+pub struct HookManager {
     plugins: Vec<Arc<WasmPlugin>>,
     plugin_config: HashMap<String, Value>,
     config_dir: PathBuf,
     model_settings: Option<crate::config::ModelSettings>,
+    permission_policy: Option<PrototypePermissionPolicy>,
     invocation_id: AtomicU64,
     tool_id: AtomicU64,
+    initialized_plugins: std::sync::Mutex<Vec<Arc<WasmPlugin>>>,
 }
 
-impl ExtensionManager {
+impl HookManager {
     pub fn get_config_dir() -> PathBuf {
         if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
             if !xdg.trim().is_empty() {
@@ -84,6 +177,36 @@ impl ExtensionManager {
         PathBuf::from(".ragent/config.toml")
     }
 
+    pub fn empty() -> Self {
+        Self::empty_at(Self::get_config_dir())
+    }
+
+    pub fn empty_at(config_dir: PathBuf) -> Self {
+        Self {
+            plugins: vec![],
+            plugin_config: HashMap::new(),
+            config_dir,
+            model_settings: None,
+            permission_policy: None,
+            invocation_id: AtomicU64::new(1),
+            tool_id: AtomicU64::new(1),
+            initialized_plugins: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn with_permission_policy(mut self, policy: PrototypePermissionPolicy) -> Self {
+        self.permission_policy = Some(policy);
+        self
+    }
+
+    pub fn set_permission_policy(&mut self, policy: PrototypePermissionPolicy) {
+        self.permission_policy = Some(policy);
+    }
+
+    pub fn permission_policy(&self) -> Option<&PrototypePermissionPolicy> {
+        self.permission_policy.as_ref()
+    }
+
     pub async fn load_from_default_config() -> Result<Self, AgentError> {
         Self::load_with_project_config(&Self::get_config_dir(), &Self::get_project_config_path())
             .await
@@ -97,10 +220,33 @@ impl ExtensionManager {
         config_dir: &Path,
         project_config_path: &Path,
     ) -> Result<Self, AgentError> {
+        let global_config = Self::load_resolved_config(config_dir, project_config_path)?;
+        let mut manager = Self::empty_at(config_dir.to_path_buf());
+        manager.model_settings = global_config.model;
+        for item in global_config
+            .extensions
+            .into_iter()
+            .filter(|item| item.enabled)
+        {
+            let path = PathBuf::from(&item.path);
+            if !path.exists() {
+                return Err(AgentError::ToolError(format!(
+                    "configured extension '{}' does not exist at {path:?}",
+                    item.name
+                )));
+            }
+            let plugin = WasmPlugin::load_from_file(&item.name, &path).await?;
+            manager.add_plugin_with_config(plugin, item.config)?;
+        }
+        Ok(manager)
+    }
+
+    pub fn load_resolved_config(
+        config_dir: &Path,
+        project_config_path: &Path,
+    ) -> Result<ExtensionsConfigFile, AgentError> {
         if !config_dir.exists() {
-            fs::create_dir_all(config_dir.join("extensions")).map_err(|e| {
-                AgentError::ToolError(format!("failed to create extension config dir: {e}"))
-            })?;
+            let _ = fs::create_dir_all(config_dir.join("extensions"));
         }
         let global_file = config_dir.join("config.toml");
         let global_value = if global_file.exists() {
@@ -114,21 +260,48 @@ impl ExtensionManager {
             toml::Value::Table(toml::map::Map::new())
         };
 
-        let mut global_config: ExtensionsConfig = global_value.clone().try_into().map_err(|e| {
-            AgentError::ToolError(format!(
-                "failed to deserialize global config {global_file:?}: {e}"
-            ))
-        })?;
+        let mut global_config: ExtensionsConfigFile =
+            global_value.clone().try_into().map_err(|e| {
+                AgentError::ToolError(format!(
+                    "failed to deserialize global config {global_file:?}: {e}"
+                ))
+            })?;
 
-        // Validate unique extension names in global config
         let mut global_names = HashSet::new();
-        for item in &global_config.extensions {
+        for item in &mut global_config.extensions {
             if !global_names.insert(item.name.clone()) {
                 return Err(AgentError::ToolError(format!(
                     "duplicate extension name '{}' in global config",
                     item.name
                 )));
             }
+
+            let raw_path = &item.path;
+            let expanded = if raw_path.starts_with('~') {
+                if let Some(home) = dirs::home_dir() {
+                    if raw_path == "~" {
+                        home
+                    } else if raw_path.starts_with("~/") || raw_path.starts_with("~\\") {
+                        home.join(&raw_path[2..])
+                    } else {
+                        PathBuf::from(raw_path)
+                    }
+                } else {
+                    PathBuf::from(raw_path)
+                }
+            } else {
+                let p = Path::new(raw_path);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    config_dir.join(p)
+                }
+            };
+            item.path = if let Ok(canon) = expanded.canonicalize() {
+                canon.to_string_lossy().to_string()
+            } else {
+                expanded.to_string_lossy().to_string()
+            };
         }
 
         if project_config_path.exists() {
@@ -136,7 +309,6 @@ impl ExtensionManager {
                 AgentError::ToolError(format!("failed to read {project_config_path:?}: {e}"))
             })?;
 
-            // 1. Strict validation of project config extensions schema
             let project_raw: ProjectConfigRaw = toml::from_str(&content).map_err(|e| {
                 AgentError::ToolError(format!(
                     "invalid extension configuration in project config {project_config_path:?}: {e}"
@@ -161,12 +333,10 @@ impl ExtensionManager {
                 }
             }
 
-            // 2. Parse TOML value and merge non-extension keys
             let mut project_value = toml::from_str::<toml::Value>(&content).map_err(|e| {
                 AgentError::ToolError(format!("failed to parse {project_config_path:?}: {e}"))
             })?;
 
-            // Extract project extensions TOML value before merging
             let project_ext_val = if let toml::Value::Table(ref mut table) = project_value {
                 table.remove("extensions")
             } else {
@@ -179,12 +349,11 @@ impl ExtensionManager {
             }
             merge_toml_value(&mut merged_value, project_value);
 
-            let other_config: ExtensionsConfig = merged_value.try_into().map_err(|e| {
+            let other_config: ExtensionsConfigFile = merged_value.try_into().map_err(|e| {
                 AgentError::ToolError(format!("failed to deserialize merged config: {e}"))
             })?;
             global_config.model = other_config.model;
 
-            // 3. Apply project extension overrides on existing global extensions
             if let Some(toml::Value::Array(project_ext_array)) = project_ext_val {
                 for ext_toml in project_ext_array {
                     if let toml::Value::Table(ext_table) = ext_toml {
@@ -215,47 +384,13 @@ impl ExtensionManager {
             }
         }
 
-        let mut manager = Self::empty_at(config_dir.to_path_buf());
-        manager.model_settings = global_config.model;
-        for item in global_config
-            .extensions
-            .into_iter()
-            .filter(|item| item.enabled)
-        {
-            let path = if Path::new(&item.path).is_absolute() {
-                PathBuf::from(&item.path)
-            } else {
-                config_dir.join(&item.path)
-            };
-            if !path.exists() {
-                return Err(AgentError::ToolError(format!(
-                    "configured extension '{}' does not exist at {path:?}",
-                    item.name
-                )));
-            }
-            let plugin = WasmPlugin::load_from_file(&item.name, &path).await?;
-            manager.add_plugin_with_config(plugin, item.config)?;
-        }
-        Ok(manager)
+        Ok(global_config)
     }
 
-    fn empty_at(config_dir: PathBuf) -> Self {
-        Self {
-            plugins: vec![],
-            plugin_config: HashMap::new(),
-            config_dir,
-            model_settings: None,
-            invocation_id: AtomicU64::new(1),
-            tool_id: AtomicU64::new(1),
-        }
-    }
-
-    pub fn empty() -> Self {
-        Self::empty_at(Self::get_config_dir())
-    }
     pub fn add_plugin(&mut self, plugin: WasmPlugin) -> Result<(), AgentError> {
         self.add_plugin_with_config(plugin, Value::Null)
     }
+
     pub fn add_plugin_with_config(
         &mut self,
         plugin: WasmPlugin,
@@ -271,33 +406,64 @@ impl ExtensionManager {
         self.plugins.push(Arc::new(plugin));
         Ok(())
     }
+
     pub fn plugins(&self) -> &[Arc<WasmPlugin>] {
         &self.plugins
     }
+
     pub fn model_settings(&self) -> Option<&crate::config::ModelSettings> {
         self.model_settings.as_ref()
     }
+
     pub fn config_dir(&self) -> &Path {
         &self.config_dir
     }
 
     pub async fn initialize(&self) -> Result<(), AgentError> {
+        {
+            let mut init_guard = self.initialized_plugins.lock().unwrap();
+            init_guard.clear();
+        }
+
         for plugin in &self.plugins {
-            plugin
-                .initialize(
-                    self.plugin_config
-                        .get(&plugin.metadata().id)
-                        .unwrap_or(&Value::Null),
-                )
-                .await?;
+            let config_val = self
+                .plugin_config
+                .get(&plugin.metadata().id)
+                .unwrap_or(&Value::Null);
+
+            match plugin.initialize(config_val).await {
+                Ok(()) => {
+                    let mut init_guard = self.initialized_plugins.lock().unwrap();
+                    init_guard.push(Arc::clone(plugin));
+                }
+                Err(e) => {
+                    let _ = self.shutdown().await;
+                    return Err(e);
+                }
+            }
         }
         Ok(())
     }
+
     pub async fn shutdown(&self) -> Result<(), AgentError> {
-        for result in join_all(self.plugins.iter().map(|p| p.shutdown())).await {
-            result?;
+        let plugins_to_shutdown: Vec<Arc<WasmPlugin>> = {
+            let mut guard = self.initialized_plugins.lock().unwrap();
+            guard.drain(..).collect()
+        };
+
+        let mut first_error = None;
+        for plugin in plugins_to_shutdown.into_iter().rev() {
+            if let Err(e) = plugin.shutdown().await {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
         }
-        Ok(())
+
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     fn request(&self, hook: &str, iteration: Option<usize>, payload: Value) -> HookRequest {
@@ -539,6 +705,37 @@ impl ExtensionManager {
             .ok_or_else(|| {
                 AgentError::ToolError(format!("extension '{owner}' does not own action '{hook}'"))
             })?;
+
+        // Prototype Permission check on action payload (for tools.call)
+        if hook == HOOK_TOOLS_CALL {
+            if let Some(ref policy) = self.permission_policy {
+                if let Ok(call_req) = serde_json::from_value::<ToolCallRequest>(payload.clone()) {
+                    // Check file_editor and image_viewer path parameters
+                    if let Some(path_str) = call_req.arguments.get("path").and_then(Value::as_str) {
+                        let path = Path::new(path_str);
+                        if call_req.name == "write_file" || call_req.name == "replace_in_file" {
+                            if let Err(e) = policy.check_file_write(path) {
+                                return Ok(serde_json::to_value(ToolResult::err(e))?);
+                            }
+                        } else if call_req.name == "view_image" {
+                            if let Err(e) = policy.check_file_read(path) {
+                                return Ok(serde_json::to_value(ToolResult::err(e))?);
+                            }
+                        }
+                    }
+                    // Check shell command work_dir
+                    if let Some(work_dir_str) =
+                        call_req.arguments.get("work_dir").and_then(Value::as_str)
+                    {
+                        let work_dir = Path::new(work_dir_str);
+                        if let Err(e) = policy.check_command_work_dir(work_dir) {
+                            return Ok(serde_json::to_value(ToolResult::err(e))?);
+                        }
+                    }
+                }
+            }
+        }
+
         let result = sub
             .plugin
             .invoke(&self.request(hook, iteration, payload))
@@ -633,12 +830,14 @@ impl ExtensionManager {
 fn parse_hook_result(value: Value) -> Result<HookResult, AgentError> {
     Ok(serde_json::from_value(value)?)
 }
+
 fn extension_error(sub: &Subscriber, hook: &str, error: impl std::fmt::Display) -> AgentError {
     AgentError::ToolError(format!(
         "extension '{}' failed at '{hook}': {error}",
         sub.plugin.metadata().id
     ))
 }
+
 fn invalid<T>(message: impl Into<String>) -> Result<T, std::io::Error> {
     Err(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
